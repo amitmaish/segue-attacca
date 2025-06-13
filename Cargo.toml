@@ -1,17 +1,24 @@
 [package]
-name = "shuffle"
+name = "segue_attacca"
 version = "0.1.0"
-authors = ["AmitMaish <83043520+AmitMaish@users.noreply.github.com>"]
+authors = ["amit"]
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-color-eyre = "0.6.5"
+base64 = "0.22.1"
 dioxus = { version = "0.6.0", features = [] }
+dioxus_storage = "0.0.4"
 futures-util = "0.3.31"
+image = "0.25.6"
+rand = "0.9.1"
 rayon = "1.10.0"
 rodio = { version = "0.20.1", features = ["tracing"] }
+serde = { version = "1.0.219", features = ["rc"] }
+serde_json = "1.0.140"
+smart-default = "0.7.1"
+thiserror = "2.0.12"
 tracing = "0.1.41"
 tracing-subscriber = "0.3.19"
 
@@ -20,8 +27,6 @@ default = ["desktop"]
 web = ["dioxus/web"]
 desktop = ["dioxus/desktop"]
 mobile = ["dioxus/mobile"]
-
-[profile]
 
 [profile.wasm-dev]
 inherits = "dev"

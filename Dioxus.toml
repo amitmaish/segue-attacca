@@ -3,7 +3,7 @@
 [web.app]
 
 # HTML title tag content
-title = "shuffle"
+title = "segue attacca"
 
 # include `assets` in web platform
 [web.resource]
