@@ -48,7 +48,7 @@ fn App() -> Element {
                     for directory_path in files {
 
                         if let Ok(library) = MusicLibrary::new_from_path(&directory_path) {
-                            tracks_signal.set(library.get_tracks_signal());
+                            tracks_signal.set(library.get_tracks());
                             music_library.set(library);
                         } else {
                             warn!("invalid path")
@@ -79,6 +79,8 @@ pub fn track_file_tree(name: String, tracks: Signal<Vec<Arc<RwLock<Track>>>>) ->
 
     impl Folder {
         fn add_to_dir(&mut self, mut path_components: Vec<&str>, name: String) {
+            let self_name = &self.name;
+            info!("add {name} to {self_name}");
             if path_components.len() >= 2 {
                 let folder;
                 if let Some(temp) = path_components.pop() {
@@ -116,6 +118,7 @@ pub fn track_file_tree(name: String, tracks: Signal<Vec<Arc<RwLock<Track>>>>) ->
                         }
                     }
                 }
+
             }
         }
     }
@@ -141,5 +144,12 @@ pub fn track_file_tree(name: String, tracks: Signal<Vec<Arc<RwLock<Track>>>>) ->
 
     info!("{folder:?}");
 
-    folder.to_rsx()
+    let rsx = folder.to_rsx();
+
+    rsx! {
+        div {
+            class: "file-tree",
+            {rsx}
+        }
+    }
 }
