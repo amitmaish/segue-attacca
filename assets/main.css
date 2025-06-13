@@ -3,21 +3,22 @@ body {
   background-color: #0f1116;
   color: #ffffff;
   font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
-  margin: 20px;
 }
 
-.directory {
+.file-tree {
+  width: 10em;
   border-style: solid;
   border-width: 1px;
-  border-color: #f00;
-  padding: 8;
-  border-radius: 8;
-}
+  border-color: red;
+  border-radius: 8px;
 
-.file {
-  border-style: solid;
-  border-width: 1px;
-  border-color: #00f;
-  padding: 8;
-  border-radius: 8;
+  padding: 8px;
+  margin: 0;
+  overflow-x: auto;
+  white-space: nowrap;
+
+  ul {
+    margin: 0;
+    padding-left: 2em;
+  }
 }
