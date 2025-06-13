@@ -130,7 +130,7 @@ impl MusicLibrary {
         Ok(lib)
     }
 
-    pub fn get_tracks_signal(&self) -> Vec<Arc<RwLock<Track>>> {
+    pub fn get_tracks(&self) -> Vec<Arc<RwLock<Track>>> {
         self.tracks.clone()
     }
 }
