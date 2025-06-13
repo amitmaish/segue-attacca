@@ -10,7 +10,7 @@ use std::{
 use dioxus::desktop::use_window;
 use dioxus::prelude::*;
 use music::{play_audio, MusicLibrary, Track};
-use tracing::info;
+use tracing::{info, warn};
 
 const FAVICON: Asset = asset!("/assets/favicon.ico");
 const MAIN_CSS: Asset = asset!("/assets/main.css");
@@ -24,7 +24,11 @@ fn main() {
 fn App() -> Element {
     use_window().window.set_always_on_top(false);
 
-    let _sound = use_coroutine(play_audio);
+    let _sound = use_coroutine(|_rx: UnboundedReceiver<()>| async move {
+        if let Err(error) = play_audio(_rx).await {
+            warn!("failed to initialize audio: {error}");
+        }
+    });
 
     let mut file = use_signal(String::new);
 
@@ -43,9 +47,12 @@ fn App() -> Element {
                     let files = file_engine.files();
                     for directory_path in files {
 
-                        let library = MusicLibrary::new_from_path(&directory_path);
-                        tracks_signal.set(library.get_tracks_signal());
-                        music_library.set(MusicLibrary::new_from_path(&directory_path));
+                        if let Ok(library) = MusicLibrary::new_from_path(&directory_path) {
+                            tracks_signal.set(library.get_tracks_signal());
+                            music_library.set(library);
+                        } else {
+                            warn!("invalid path")
+                        }
 
                         file.set(directory_path);
                     }
@@ -73,7 +80,12 @@ pub fn track_file_tree(name: String, tracks: Signal<Vec<Arc<RwLock<Track>>>>) ->
     impl Folder {
         fn add_to_dir(&mut self, mut path_components: Vec<&str>, name: String) {
             if path_components.len() >= 2 {
-                let folder = path_components.pop().unwrap();
+                let folder;
+                if let Some(temp) = path_components.pop() {
+                    folder = temp;
+                } else {
+                    unreachable!()
+                }
 
                 if let Some(directory) = self.folders.get_mut(folder) {
                     directory.add_to_dir(path_components, name);
@@ -113,8 +125,13 @@ pub fn track_file_tree(name: String, tracks: Signal<Vec<Arc<RwLock<Track>>>>) ->
         ..Default::default()
     };
 
-    for track in tracks() {
-        let track = track.read().unwrap();
+    for temp in tracks() {
+        let track;
+        if let Ok(temp) = temp.read() {
+            track = temp;
+        } else {
+            continue;
+        }
         let track = track.deref();
 
         let path_components: Vec<&str> = track.path().split("/").collect();

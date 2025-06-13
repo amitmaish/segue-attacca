@@ -2,7 +2,7 @@ use std::{
     collections::{HashMap, HashSet},
     ffi::OsStr,
     fs::{read_dir, DirEntry, File},
-    io::{BufReader, Write},
+    io::{self, BufReader, Write},
     path::Path,
     sync::{Arc, RwLock, Weak},
 };
@@ -13,7 +13,14 @@ use rand::{rng, seq::SliceRandom};
 use rodio::{Decoder, OutputStream, Sink};
 use serde::{Deserialize, Serialize};
 use smart_default::SmartDefault;
+use thiserror::Error;
 use tracing::{info, warn};
+
+#[derive(Error, Debug)]
+pub enum MusicLibraryError {
+    #[error("couldn't open {0}")]
+    IOError(#[from] io::Error),
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct MusicLibrary {
@@ -24,11 +31,11 @@ pub struct MusicLibrary {
 }
 
 impl MusicLibrary {
-    pub fn new_from_path(path: &str) -> MusicLibrary {
+    pub fn new_from_path(path: &str) -> Result<MusicLibrary, MusicLibraryError> {
         let mut lib = MusicLibrary::default();
         lib.path = path.into();
 
-        let dir = read_dir(path).unwrap();
+        let dir = read_dir(path)?;
         let prefix = Path::new(path);
 
         let mut read_queue: Vec<DirEntry> = dir.flatten().collect();
@@ -84,9 +91,14 @@ impl MusicLibrary {
                     continue;
                 }
                 if extension == "wav" || extension == "mp3" {
-                    let item_path = item.path();
-                    let item_path = item_path.strip_prefix(prefix).unwrap();
-                    info!("{item_path:?}");
+                    let item_full_path = item.path();
+                    let item_path;
+                    if let Ok(no_prefix) = item_full_path.strip_prefix(prefix) {
+                        item_path = no_prefix;
+                    } else {
+                        unreachable!();
+                    }
+                    info!("{item_full_path:?}");
                     let path: Box<str>;
                     if let Some(temp) = item_path.to_str() {
                         path = temp.into();
@@ -115,7 +127,7 @@ impl MusicLibrary {
             }
         }
 
-        lib
+        Ok(lib)
     }
 
     pub fn get_tracks_signal(&self) -> Vec<Arc<RwLock<Track>>> {
@@ -238,19 +250,34 @@ impl Iterator for Playlist {
     }
 }
 
-pub async fn play_audio(mut rx: UnboundedReceiver<()>) {
-    let (_stream, stream_handle) = OutputStream::try_default().unwrap();
-    let sink = Sink::try_new(&stream_handle).unwrap();
+#[derive(Error, Debug)]
+pub enum AudioError {
+    #[error("couldn't initialize default audio source")]
+    Stream(#[from] rodio::StreamError),
+    #[error("couldn't create audio sink")]
+    Play(#[from] rodio::PlayError),
+    #[error("couldn't decode audio file")]
+    Decode(#[from] rodio::decoder::DecoderError),
 
-    let file = BufReader::new(File::open("assets/honey.wav").unwrap());
-    let source = Decoder::new(file).unwrap();
+    #[error("couldn't open file")]
+    IO(#[from] io::Error),
+}
+
+pub async fn play_audio(mut rx: UnboundedReceiver<()>) -> Result<(), AudioError> {
+    let (_stream, stream_handle) = OutputStream::try_default()?;
+    let sink = Sink::try_new(&stream_handle)?;
+
+    let file = BufReader::new(File::open("assets/honey.wav")?);
+    let source = Decoder::new(file)?;
 
     sink.append(source);
 
-    let file = BufReader::new(File::open("assets/silver_lullaby.wav").unwrap());
-    let source = Decoder::new(file).unwrap();
+    let file = BufReader::new(File::open("assets/silver_lullaby.wav")?);
+    let source = Decoder::new(file)?;
 
     sink.append(source);
 
     while let Some(_message) = rx.next().await {}
+
+    Ok(())
 }
