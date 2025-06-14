@@ -32,98 +32,108 @@ pub struct MusicLibrary {
 
 impl MusicLibrary {
     pub fn new_from_path(path: &str) -> Result<MusicLibrary, MusicLibraryError> {
-        let mut lib = MusicLibrary::default();
-        lib.path = path.into();
-
         let dir = read_dir(path)?;
         let prefix = Path::new(path);
 
         let mut read_queue: Vec<DirEntry> = dir.flatten().collect();
 
-        while let Some(item) = read_queue.pop() {
-            let file_type;
-            if let Ok(filetype) = item.file_type() {
-                file_type = filetype;
-            } else {
-                continue;
-            }
-            if file_type.is_file() {
-                let file_name = &item.file_name();
+        let libjson = read_queue
+            .iter()
+            .find(|item| item.file_name() == OsStr::new("music_library.json"));
+        let cached_lib = || {
+            if let Some(file) = libjson {
+                let filename;
+                let file_name = file.file_name();
+                if let Some(temp) = file_name.to_str() {
+                    filename = temp;
+                } else {
+                    return None;
+                }
+                let file = match File::open(format!("{path}/{filename}")) {
+                    Ok(temp) => temp,
+                    Err(err) => {
+                        warn!("couldn't open json file {err}");
+                        return None;
+                    }
+                };
+                let reader = BufReader::new(file);
 
-                if file_name == OsStr::new("music_library.json") {
-                    let filename;
-                    if let Some(temp) = file_name.to_str() {
-                        filename = temp;
+                let lib: Result<MusicLibrary, _> = serde_json::from_reader(reader);
+                if let Ok(mut library) = lib {
+                    library.path = path.into();
+                    Some(library)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        };
+
+        let mut lib;
+        if let Some(library) = cached_lib() {
+            lib = library;
+        } else {
+            lib = MusicLibrary::default();
+            lib.path = path.into();
+            while let Some(item) = read_queue.pop() {
+                let file_type;
+                if let Ok(filetype) = item.file_type() {
+                    file_type = filetype;
+                } else {
+                    continue;
+                }
+                if file_type.is_file() {
+                    let file_name = item.file_name();
+
+                    let extension;
+                    if let Some(temp) = Path::new(&file_name).extension() {
+                        extension = temp;
                     } else {
                         continue;
                     }
 
-                    let file = match File::open(format!("{path}/{filename}")) {
-                        Ok(temp) => temp,
-                        Err(err) => {
-                            warn!("couldn't open json file {err}");
+                    let name;
+                    if let Some(temp) = file_name.to_str() {
+                        name = temp.into()
+                    } else {
+                        continue;
+                    }
+                    if extension == "wav" || extension == "mp3" {
+                        let item_full_path = item.path();
+                        let item_path;
+                        if let Ok(no_prefix) = item_full_path.strip_prefix(prefix) {
+                            item_path = no_prefix;
+                        } else {
+                            unreachable!();
+                        }
+                        info!("{item_full_path:?}");
+                        let path: Box<str>;
+                        if let Some(temp) = item_path.to_str() {
+                            path = temp.into();
+                        } else {
                             continue;
                         }
-                    };
-                    let reader = BufReader::new(file);
 
-                    if let Ok(library) = serde_json::from_reader(reader) {
-                        lib = library;
-                        if lib.path != path.into() {
-                            lib.path = path.into();
-                        }
+                        let track = Arc::new(RwLock::new(Track {
+                            path: path.clone(),
+                            name,
+                            ..Default::default()
+                        }));
 
-                        break;
+                        lib.tracks.push(Arc::clone(&track));
                     }
-                }
-
-                let extension;
-                if let Some(temp) = Path::new(file_name).extension() {
-                    extension = temp;
-                } else {
-                    continue;
-                }
-
-                let name;
-                if let Some(temp) = file_name.to_str() {
-                    name = temp.into()
-                } else {
-                    continue;
-                }
-                if extension == "wav" || extension == "mp3" {
-                    let item_full_path = item.path();
-                    let item_path;
-                    if let Ok(no_prefix) = item_full_path.strip_prefix(prefix) {
-                        item_path = no_prefix;
-                    } else {
-                        unreachable!();
-                    }
-                    info!("{item_full_path:?}");
-                    let path: Box<str>;
-                    if let Some(temp) = item_path.to_str() {
-                        path = temp.into();
+                } else if file_type.is_dir() {
+                    let dir;
+                    if let Ok(temp) = read_dir(item.path()) {
+                        dir = temp;
                     } else {
                         continue;
                     }
-
-                    let track = Arc::new(RwLock::new(Track {
-                        path: path.clone(),
-                        name,
-                        ..Default::default()
-                    }));
-
-                    lib.tracks.push(Arc::clone(&track));
+                    dir.flatten().for_each(|item| {
+                        read_queue.push(item);
+                    });
                 }
-            } else if file_type.is_dir() {
-                let dir;
-                if let Ok(temp) = read_dir(item.path()) {
-                    dir = temp;
-                } else {
-                    continue;
-                }
-                dir.flatten().for_each(|item| {
-                    read_queue.push(item);
-                });
             }
         }
 
@@ -143,6 +153,96 @@ impl Drop for MusicLibrary {
                 let _ = file.write_all(json.as_ref());
             }
         }
+    }
+}
+
+impl PartialEq for MusicLibrary {
+    fn eq(&self, other: &Self) -> bool {
+        let tracks = self.tracks.iter().zip(other.tracks.iter());
+        for (arc1, arc2) in tracks {
+            let track1;
+            if let Ok(track) = arc1.read() {
+                track1 = track;
+            } else {
+                return false;
+            }
+            let track2;
+            if let Ok(track) = arc2.read() {
+                track2 = track;
+            } else {
+                return false;
+            }
+            if *track1 != *track2 {
+                return false;
+            }
+        }
+
+        let playlists = self.playlists.iter().zip(other.playlists.iter());
+        for (arc1, arc2) in playlists {
+            let playlist1;
+            if let Ok(playlist) = arc1.read() {
+                playlist1 = playlist;
+            } else {
+                return false;
+            }
+            let playlist2;
+            if let Ok(playlist) = arc2.read() {
+                playlist2 = playlist;
+            } else {
+                return false;
+            }
+            if *playlist1 != *playlist2 {
+                return false;
+            }
+        }
+
+        let tags = self.tags.clone().into_iter().zip(other.tags.clone());
+        for (tags1, tags2) in tags.into_iter() {
+            let key1 = tags1.0;
+            let key2 = tags2.0;
+
+            if key1 != key2 {
+                return false;
+            }
+
+            let values1 = tags1.1;
+            let values2 = tags2.1;
+
+            let values = values1.iter().zip(values2.iter());
+            for (weak1, weak2) in values {
+                let arc1;
+                if let Some(value) = weak1.upgrade() {
+                    arc1 = value;
+                } else {
+                    return false;
+                }
+                let arc2;
+                if let Some(value) = weak2.upgrade() {
+                    arc2 = value;
+                } else {
+                    return false;
+                }
+
+                let value1;
+                if let Ok(value) = arc1.read() {
+                    value1 = value;
+                } else {
+                    return false;
+                }
+
+                let value2;
+                if let Ok(value) = arc2.read() {
+                    value2 = value;
+                } else {
+                    return false;
+                }
+                if *value1 != *value2 {
+                    return false;
+                }
+            }
+        }
+
+        self.path == other.path
     }
 }
 
@@ -178,7 +278,7 @@ impl Track {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, SmartDefault, Clone)]
+#[derive(Serialize, Deserialize, Debug, SmartDefault, Clone, PartialEq)]
 pub struct Playlist {
     pub name: Option<String>,
     pub items: Vec<PlaylistItem>,
@@ -198,8 +298,30 @@ pub enum PlaylistItem {
     Playlist(Arc<RwLock<Playlist>>),
 }
 
+impl PartialEq for PlaylistItem {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Track(l0), Self::Track(r0)) => {
+                if let (Ok(track1), Ok(track2)) = (l0.read(), r0.read()) {
+                    *track1 == *track2
+                } else {
+                    false
+                }
+            }
+            (Self::Playlist(l0), Self::Playlist(r0)) => {
+                if let (Ok(playlist1), Ok(playlist)) = (l0.read(), r0.read()) {
+                    *playlist1 == *playlist
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
+}
+
 /// sets the order that a playlist will play back its items
-#[derive(Serialize, Deserialize, Debug, Default, Clone, Copy)]
+#[derive(Serialize, Deserialize, Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum PlaybackMode {
     /// the playlist will play all the tracks in order before ending
     #[default]

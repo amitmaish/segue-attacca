@@ -9,7 +9,6 @@ edition = "2021"
 [dependencies]
 base64 = "0.22.1"
 dioxus = { version = "0.6.0", features = [] }
-dioxus_storage = "0.0.4"
 futures-util = "0.3.31"
 image = "0.25.6"
 rand = "0.9.1"

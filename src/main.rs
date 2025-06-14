@@ -3,14 +3,21 @@ mod music;
 
 use std::{
     collections::HashMap,
+    env,
+    fs::File,
+    io::{BufReader, Write},
     ops::Deref,
-    sync::{Arc, RwLock},
+    sync::{
+        mpsc::{channel, Receiver, Sender},
+        Arc, RwLock,
+    },
 };
 
 use dioxus::desktop::use_window;
 use dioxus::prelude::*;
 use music::{play_audio, MusicLibrary, Track};
-use tracing::{info, warn};
+use serde::{Deserialize, Serialize};
+use tracing::{error, info, warn};
 
 const FAVICON: Asset = asset!("/assets/favicon.ico");
 const MAIN_CSS: Asset = asset!("/assets/main.css");
@@ -24,16 +31,41 @@ fn main() {
 fn App() -> Element {
     use_window().window.set_always_on_top(false);
 
+    let app_manager = AppManager::default();
+    let app_handle = app_manager.tx();
+    app_manager.handle_messages();
+
     let _sound = use_coroutine(|_rx: UnboundedReceiver<()>| async move {
         if let Err(error) = play_audio(_rx).await {
-            warn!("failed to initialize audio: {error}");
+            error!("failed to initialize audio: {error}");
         }
     });
 
     let mut file = use_signal(String::new);
 
-    let mut music_library = use_signal(MusicLibrary::default);
     let mut tracks_signal = use_signal(Vec::<Arc<RwLock<Track>>>::new);
+
+    let (temptx, temprx) = channel();
+    app_handle.send(AppMessage::GetLibraryPath(temptx))?;
+    let music_library = if let Ok(temp) = temprx.recv() {
+        match temp {
+            Some(path) => {
+                info!("searching for music library at {path}");
+                let lib = MusicLibrary::new_from_path(path.deref()).ok();
+                if let Some(lib) = &lib {
+                    tracks_signal.set(lib.get_tracks());
+                }
+                lib
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let mut music_library = use_signal(move || {
+        info!("found {music_library:?}");
+        music_library
+    });
     rsx! {
         document::Link { rel: "icon", href: FAVICON }
         document::Link { rel: "stylesheet", href: MAIN_CSS }
@@ -46,10 +78,14 @@ fn App() -> Element {
                 if let Some(file_engine) = &evt.files() {
                     let files = file_engine.files();
                     for directory_path in files {
+                        let res = app_handle.send(AppMessage::SetLibraryPath(directory_path.clone()));
+                        if res.is_err() {
+                            error!("app handle dropped");
+                        }
 
                         if let Ok(library) = MusicLibrary::new_from_path(&directory_path) {
                             tracks_signal.set(library.get_tracks());
-                            music_library.set(library);
+                            music_library.set(Some(library));
                         } else {
                             warn!("invalid path")
                         }
@@ -59,7 +95,6 @@ fn App() -> Element {
                 }
             }
         }
-        // img { src: image_to_url(r#"/Users/amit/Desktop/shuffle/Zhea Erose - Dreamsura/cover.jpg"#)? }
 
         track_file_tree {
             name: "root",
@@ -152,4 +187,98 @@ pub fn track_file_tree(name: String, tracks: Signal<Vec<Arc<RwLock<Track>>>>) ->
             {rsx}
         }
     }
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct AppConfig {
+    pub path_to_music_library: Option<Arc<str>>,
+}
+
+impl AppConfig {
+    fn from_conf() -> Self {
+        let home: String;
+        if let Some(path) = env::home_dir() {
+            home = path.to_string_lossy().into();
+        } else {
+            return AppConfig::default();
+        }
+
+        let path = format!("{home}/.config/segue-attacca.json");
+
+        let file = match File::open(path) {
+            Ok(temp) => temp,
+            Err(err) => {
+                warn!("couldn't open json file: {err}");
+                return AppConfig::default();
+            }
+        };
+        let reader = BufReader::new(file);
+
+        let conf = serde_json::from_reader(reader).unwrap_or_default();
+        info!("your apps config is: {conf:?}");
+        conf
+    }
+
+    fn update_conf_file(&mut self) {
+        let home: String;
+        if let Some(path) = env::home_dir() {
+            home = path.to_string_lossy().into();
+        } else {
+            return;
+        }
+        if let Ok(json) = serde_json::to_vec_pretty(self) {
+            if let Ok(mut file) = File::create(format!("{home}/.config/segue-attacca.json")) {
+                let _ = file.write_all(json.as_ref());
+            }
+        }
+    }
+}
+
+struct AppManager {
+    rx: Receiver<AppMessage>,
+    tx: Sender<AppMessage>,
+
+    conf: AppConfig,
+}
+
+impl AppManager {
+    fn tx(&self) -> Sender<AppMessage> {
+        self.tx.clone()
+    }
+
+    fn handle_messages(mut self) {
+        rayon::spawn(move || {
+            while let Ok(message) = self.rx.recv() {
+                info!("message {message:?}");
+                match message {
+                    AppMessage::GetLibraryPath(sender) => {
+                        let path = self.conf.path_to_music_library.clone();
+                        if let Err(e) = sender.send(path) {
+                            error!("Send error from AppMessage {e}");
+                        }
+                    }
+                    AppMessage::SetLibraryPath(path) => {
+                        self.conf.path_to_music_library = Some(path.into());
+                        self.conf.update_conf_file();
+                    }
+                    AppMessage::Quit => break,
+                }
+            }
+        });
+    }
+}
+
+impl Default for AppManager {
+    fn default() -> Self {
+        let (tx, rx) = channel();
+        let conf = AppConfig::from_conf();
+        Self { rx, tx, conf }
+    }
+}
+
+#[derive(Debug)]
+pub enum AppMessage {
+    GetLibraryPath(Sender<Option<Arc<str>>>),
+    SetLibraryPath(String),
+    Quit,
 }
