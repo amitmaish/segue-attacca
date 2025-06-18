@@ -1,40 +1,17 @@
 [package]
-name = "segue_attacca"
+name = "segue-attacka-ui"
 version = "0.1.0"
-authors = ["amit"]
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
 [dependencies]
-axum = { version = "0.8.4", optional = true }
-base64 = "0.22.1"
-dioxus = { version = "0.6.3", features = ["fullstack"] }
-futures-util = "0.3.31"
-image = "0.25.6"
-rand = "0.9.1"
-rayon = "1.10.0"
-rodio = { version = "0.20.1", features = ["tracing"] }
-serde = { version = "1.0.219", features = ["rc"] }
-serde_json = "1.0.140"
-smart-default = "0.7.1"
-thiserror = "2.0.12"
-tokio = { version = "1.45.1", optional = true }
-tower-http = { version = "0.6.6", features = ["fs"] }
-tracing = "0.1.41"
-tracing-subscriber = "0.3.19"
+leptos = { version = "0.7", features = ["csr"] }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde-wasm-bindgen = "0.6"
+console_error_panic_hook = "0.1.7"
 
-[features]
-default = ["desktop"]
-desktop = ["dioxus/desktop"]
-server = ["dioxus/server", "dep:axum", "dep:tokio"]
-
-[profile.wasm-dev]
-inherits = "dev"
-opt-level = 1
-
-[profile.server-dev]
-inherits = "dev"
-
-[profile.android-dev]
-inherits = "dev"
+[workspace]
+members = ["src-tauri"]
