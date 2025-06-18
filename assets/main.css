@@ -24,8 +24,6 @@ body {
 }
 
 .file-tree {
-  width: 10em;
-  height: 10em;
   border-style: solid;
   border-width: 1px;
   border-color: red;
@@ -45,5 +43,10 @@ body {
   ul {
     margin: 0;
     padding-left: 2em;
+
+    list-style: none;
+    li:hover {
+      background-color: lightgrey;
+    }
   }
 }

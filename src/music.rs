@@ -16,6 +16,8 @@ use smart_default::SmartDefault;
 use thiserror::Error;
 use tracing::{info, warn};
 
+use crate::image::{image_to_url, Image};
+
 #[derive(Error, Debug)]
 pub enum MusicLibraryError {
     #[error("couldn't open {0}")]
@@ -27,6 +29,7 @@ pub struct MusicLibrary {
     path: Box<str>,
     tracks: Vec<Arc<RwLock<Track>>>,
     playlists: Vec<Arc<RwLock<Playlist>>>,
+    artists: Vec<Arc<str>>,
     tags: HashMap<Arc<str>, Vec<Weak<RwLock<Track>>>>,
 }
 
@@ -251,9 +254,11 @@ pub struct Track {
     path: Box<str>,
     name: Box<str>,
     artist: Option<Arc<str>>,
-    // features: Option<Vec<Arc<str>>>,
-    album_art: Option<String>,
+    album_art: Option<Box<str>>,
     tags: HashSet<Arc<str>>,
+
+    #[serde(skip)]
+    art_loaded: bool,
 }
 
 impl Track {
@@ -275,6 +280,40 @@ impl Track {
 
     pub fn _tags(&self) -> &HashSet<Arc<str>> {
         &self.tags
+    }
+
+    pub fn album_art(&self) -> Option<Box<str>> {
+        self.album_art.clone()
+    }
+
+    pub fn set_album_art(&mut self, art: Option<Box<str>>) {
+        self.album_art = art;
+    }
+
+    pub fn load_album_art(&self, mut art: Signal<Image, SyncStorage>, resize: Option<(u32, u32)>) {
+        match *art.read() {
+            Image::Some(_) | Image::Loading => return,
+            Image::None => (),
+        }
+        let image_path = self.album_art.clone();
+        info!("loading album art");
+        rayon::spawn(move || {
+            if let Some(path) = image_path {
+                art.set(Image::Loading);
+                info!("found album art path");
+                let image = image_to_url(&path, resize);
+                if let Ok(image) = image {
+                    info!("updating album art");
+                    art.set(Image::Some(image.into()));
+                } else {
+                    warn!("failed to load album art");
+                    art.set(Image::None);
+                }
+            } else {
+                info!("no alum art for selected track");
+                art.set(Image::None);
+            }
+        });
     }
 }
 

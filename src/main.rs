@@ -15,16 +15,31 @@ use std::{
 
 use dioxus::desktop::use_window;
 use dioxus::prelude::*;
+use image::Image;
 use music::{play_audio, MusicLibrary, Track};
 use serde::{Deserialize, Serialize};
 use tracing::{error, info, warn};
 
 const FAVICON: Asset = asset!("/assets/favicon.ico");
 const MAIN_CSS: Asset = asset!("/assets/main.css");
+const SONG_NOT_FOUND: Asset = asset!("assets/song_not_found.svg");
 
+#[cfg(not(feature = "server"))]
 fn main() {
     tracing_subscriber::fmt::init();
+
     dioxus::launch(App);
+}
+
+#[cfg(feature = "server")]
+#[tokio::main]
+async fn main() {
+    let address = dioxus::cli_config::fullstack_address_or_localhost();
+
+    let router = axum::Router::new().serve_dioxus_application(ServeConfigBuilder::default(), App);
+    let router = router.into_make_service();
+    let listener = tokio::net::TcpListener::bind(address).await.unwrap();
+    axum::serve(listener, router).await.unwrap();
 }
 
 #[component]
@@ -44,6 +59,8 @@ fn App() -> Element {
     let mut file = use_signal(String::new);
 
     let mut tracks_signal = use_signal(Vec::<Arc<RwLock<Track>>>::new);
+    let selected_track = use_signal(|| None);
+    let selected_track_image = use_signal_sync(Image::default);
 
     let (temptx, temprx) = channel();
     app_handle.send(AppMessage::GetLibraryPath(temptx))?;
@@ -99,21 +116,36 @@ fn App() -> Element {
         track_file_tree {
             name: "root",
             tracks: tracks_signal,
+            selected_track
+        }
+
+        track_inspector {
+            selected_track,
+            image: selected_track_image,
         }
     }
 }
 
 #[component]
-pub fn track_file_tree(name: String, tracks: Signal<Vec<Arc<RwLock<Track>>>>) -> Element {
+pub fn track_file_tree(
+    name: String,
+    tracks: Signal<Vec<Arc<RwLock<Track>>>>,
+    selected_track: Signal<Option<Arc<RwLock<Track>>>>,
+) -> Element {
     #[derive(Debug, Default)]
     struct Folder {
         name: String,
         folders: HashMap<String, Folder>,
-        files: Vec<String>,
+        tracks: Vec<Arc<RwLock<Track>>>,
     }
 
     impl Folder {
-        fn add_to_dir(&mut self, mut path_components: Vec<&str>, name: String) {
+        fn add_to_dir(
+            &mut self,
+            mut path_components: Vec<&str>,
+            name: String,
+            track: Arc<RwLock<Track>>,
+        ) {
             let self_name = &self.name;
             info!("add {name} to {self_name}");
             if path_components.len() >= 2 {
@@ -125,31 +157,51 @@ pub fn track_file_tree(name: String, tracks: Signal<Vec<Arc<RwLock<Track>>>>) ->
                 }
 
                 if let Some(directory) = self.folders.get_mut(folder) {
-                    directory.add_to_dir(path_components, name);
+                    directory.add_to_dir(path_components, name, track);
                 } else {
                     info!("new folder: {folder}");
                     let mut directory = Folder {
                         name: folder.into(),
                         ..Default::default()
                     };
-                    directory.add_to_dir(path_components, name);
+                    directory.add_to_dir(path_components, name, track);
                     self.folders.insert(folder.into(), directory);
                 }
             } else {
-                self.files.push(name);
+                self.tracks.push(track);
             }
         }
 
-        fn to_rsx(&self) -> Element {
-            let folders = self.folders.iter().map(|f| f.1.to_rsx());
+        fn to_rsx(&self, mut selected_track: Signal<Option<Arc<RwLock<Track>>>>) -> Element {
+            let folders = self.folders.iter().map(|f| f.1.to_rsx(selected_track));
+            let tracks = self.tracks.clone();
+            let names: Vec<Box<str>> = tracks
+                .clone()
+                .iter()
+                .filter_map(|t| {
+                    let name: Box<str>;
+                    if let Ok(track) = t.read() {
+                        name = track.name().into();
+                        Some(name)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
             rsx! {
                 details {
                     summary {
                         "{self.name}"
                     }
                     ul { {folders} }
-                    ul { for file in self.files.clone() {
-                            li { key: "{file}", "{file}" }
+                    ul {
+                        for (track, name) in tracks.into_iter().zip(names) {
+                            li {
+                                onclick: move |_| {info!("{name} selected");
+                                selected_track.set(Some(track.clone()));
+                            },
+                                key: "{name}", "{name}",
+                            }
                         }
                     }
                 }
@@ -174,17 +226,63 @@ pub fn track_file_tree(name: String, tracks: Signal<Vec<Arc<RwLock<Track>>>>) ->
 
         let path_components: Vec<&str> = track.path().split("/").collect();
         let path_components = path_components.into_iter().rev().collect();
-        folder.add_to_dir(path_components, track.name().to_string());
+        folder.add_to_dir(path_components, track.name().to_string(), temp.clone());
     }
 
-    info!("{folder:?}");
-
-    let rsx = folder.to_rsx();
+    let rsx = folder.to_rsx(selected_track);
 
     rsx! {
         div {
             class: "file-tree",
             {rsx}
+        }
+    }
+}
+
+#[component]
+pub fn track_inspector(
+    selected_track: Signal<Option<Arc<RwLock<Track>>>>,
+    image: Signal<Image, SyncStorage>,
+) -> Element {
+    if let Some(track) = selected_track() {
+        if let Ok(track_read) = track.clone().read() {
+            track_read.load_album_art(image, Some((256, 256)));
+        }
+        rsx! {
+            div {
+                class: "track-inspetor",
+                if let Ok(track_read) = track.clone().read() {
+                    h1 { "{track_read.name()}" }
+                    if let Image::Some(art) = image.read().deref() {
+                        img { src: "{art}" }
+                    } else if Image::Loading == *image.read() {
+                        img {src: SONG_NOT_FOUND}
+                    }
+                    input {
+                    r#type: "file",
+                        directory: false,
+
+                        onchange: move |evt| {
+                            if let Some(file_engine) = &evt.files() {
+                                let files = file_engine.files();
+                                for file in files {
+                                    let track = track.clone();
+                                    let track = track.write();
+                                    if let Ok(mut track_write) = track {
+                                        info!("setting album art to: {file}");
+                                        track_write.set_album_art(Some(file.into()));
+                                        selected_track.set(selected_track());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    } else {
+        rsx! {
+            h1 { "select a track" }
         }
     }
 }

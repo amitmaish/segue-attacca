@@ -1,9 +1,21 @@
 use base64::prelude::*;
+use image::imageops::FilterType;
 use std::io::Cursor;
 use thiserror::Error;
 
-pub fn _image_to_url(path: &str) -> Result<String, ImageError> {
-    let image = image::open(path)?;
+#[derive(Default, Debug, PartialEq, Eq)]
+pub enum Image {
+    Some(Box<str>),
+    Loading,
+    #[default]
+    None,
+}
+
+pub fn image_to_url(path: &str, resize: Option<(u32, u32)>) -> Result<String, ImageError> {
+    let mut image = image::open(path)?;
+    if let Some((x, y)) = resize {
+        image = image.resize(x, y, FilterType::CatmullRom);
+    }
 
     let mut buf = Vec::<u8>::new();
     image.write_to(&mut Cursor::new(&mut buf), image::ImageFormat::WebP)?;
