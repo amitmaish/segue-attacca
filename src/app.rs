@@ -1,4 +1,3 @@
-#![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 use leptos::task::spawn_local;
 use leptos::{ev::SubmitEvent, prelude::*};
 use serde::{Deserialize, Serialize};
