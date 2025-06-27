@@ -18,3 +18,4 @@ members = ["src-tauri"]
 
 [lints.clippy]
 unwrap_used = "warn"
+expect_used = "warn"
