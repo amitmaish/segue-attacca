@@ -1,4 +1,0 @@
-edition = "2021"
-
-[rustfmt]
-overrideCommand = ["leptosfmt", "--stdin", "--rustfmt"]

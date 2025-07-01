@@ -1,0 +1,25 @@
+[package]
+name = "segue-attacca-tui"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+color-eyre = "0.6.5"
+image = "0.25.6"
+pollster = "0.4.0"
+ratatui = { version = "0.29.0", features = ["all-widgets"] }
+ratatui-image = "8.0.1"
+rayon = "1.10.0"
+rfd = "0.15.3"
+segue-attacca-lib = { path = "../segue-attacca-lib" }
+serde = { version = "1.0.219", features = ["derive", "rc"] }
+strum = { version = "0.27.1", features = ["derive"] }
+textwrap = "0.16.2"
+tokio = { version = "1.45.1", features = ["macros", "sync", "rt-multi-thread"] }
+tracing = "0.1.41"
+tracing-subscriber = "0.3.19"
+tui-scrollview = "0.5.1"
+tui-tree-widget = "0.23.1"
+
+[lints]
+workspace = true
