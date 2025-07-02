@@ -17,6 +17,7 @@ use ratatui::{
     widgets::{Block, BorderType, List, ListState, Paragraph, StatefulWidget, Widget, Wrap},
 };
 use ratatui_image::{StatefulImage, picker::Picker, protocol::StatefulProtocol};
+use rfd::FileDialog;
 use segue_attacca_lib::music_library::{MusicLibrary, Track};
 use strum::Display;
 use tokio::sync::{
@@ -161,7 +162,12 @@ fn handle_terminal_events(tx: Sender<Event>) -> Result<()> {
             },
             CE::Mouse(_mouse_event) => (),
             CE::Paste(_) => (),
-            CE::Resize(_, _) => (),
+            CE::Resize(_, _) => {
+                if tx.blocking_send(Event::Redraw).is_ok() {
+                    continue;
+                }
+                break Ok(());
+            }
         }
     }
 }
@@ -203,16 +209,6 @@ fn handle_track_list_events(event: &Event, state: &mut AppState) -> bool {
 
 fn handle_inspector_events(event: &Event, state: &mut AppState) -> bool {
     match event {
-        Event::KeyPressed(KeyCode::Tab, modifier) => {
-            if let Some(inspector) = state.track_inspector.as_mut() {
-                if modifier.shift {
-                    inspector.selected_field = inspector.selected_field.prev();
-                } else {
-                    inspector.selected_field = inspector.selected_field.next();
-                }
-            }
-            true
-        }
         Event::KeyPressed(KeyCode::Enter, _) => {
             if let Some(inspector) = state.track_inspector.as_mut() {
                 if let Some(value) = inspector.editing_value.as_ref() {
@@ -236,8 +232,34 @@ fn handle_inspector_events(event: &Event, state: &mut AppState) -> bool {
                         }
                     }
                     inspector.editing_value = None;
-                } else {
-                    inspector.editing_value = Some(String::new());
+                } else if let Some(lock) = inspector.track.upgrade() {
+                    if let Ok(mut track) = lock.write() {
+                        let value = match inspector.selected_field {
+                            TrackInspectorSelectedField::None => String::new(),
+                            TrackInspectorSelectedField::Name => track.name.to_string(),
+                            TrackInspectorSelectedField::Art => {
+                                if let Some(path) = FileDialog::new()
+                                    .set_directory(state.library.path.as_ref())
+                                    .pick_file()
+                                {
+                                    track.album_art = Some(path.to_string_lossy().into());
+                                } else {
+                                    track.album_art = None;
+                                }
+                                return true;
+                            }
+                            TrackInspectorSelectedField::Artist => {
+                                if let Some(artist) = track.artist.as_ref() {
+                                    artist.to_string()
+                                } else {
+                                    String::new()
+                                }
+                            }
+                            TrackInspectorSelectedField::Tags => String::new(),
+                        };
+
+                        inspector.editing_value = Some(value);
+                    }
                 }
             }
             true
@@ -247,6 +269,12 @@ fn handle_inspector_events(event: &Event, state: &mut AppState) -> bool {
                 if let Some(value) = inspector.editing_value.as_mut() {
                     value.push(*c);
                     return true;
+                } else {
+                    match c {
+                        'j' => inspector.selected_field = inspector.selected_field.next(),
+                        'k' => inspector.selected_field = inspector.selected_field.prev(),
+                        _ => (),
+                    }
                 }
             }
             false
@@ -255,6 +283,15 @@ fn handle_inspector_events(event: &Event, state: &mut AppState) -> bool {
             if let Some(inspector) = state.track_inspector.as_mut() {
                 if let Some(value) = inspector.editing_value.as_mut() {
                     let _ = value.pop();
+                    return true;
+                }
+            }
+            false
+        }
+        Event::KeyPressed(KeyCode::Escape, _) => {
+            if let Some(inspector) = state.track_inspector.as_mut() {
+                if let Some(_value) = inspector.editing_value.as_mut() {
+                    inspector.editing_value = None;
                     return true;
                 }
             }
