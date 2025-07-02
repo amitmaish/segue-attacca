@@ -196,6 +196,21 @@ impl MusicLibrary {
             .map(|(i, tag)| (i, Rc::clone(tag)))
             .collect();
         for (i, _) in temp {
+            if i < self.tags.len() {
+                continue;
+            }
+            self.tags.remove(i);
+        }
+
+        let mut indecies = Vec::new();
+        for (i, tag) in self.tags.iter().enumerate() {
+            if Rc::strong_count(tag) > 1 {
+                continue;
+            } else {
+                indecies.push(i);
+            }
+        }
+        for i in indecies {
             self.tags.remove(i);
         }
     }

@@ -1,0 +1,509 @@
+use std::{
+    fmt::Display,
+    rc::{Rc, Weak},
+    sync::RwLock,
+};
+
+use fuzzy_matcher::{FuzzyMatcher, skim::SkimMatcherV2};
+use ratatui::{
+    layout::Layout,
+    prelude::Text,
+    style::{Color, Style, Stylize},
+    text::{Line, Span},
+    widgets::{Block, BorderType, List, ListState, Paragraph, StatefulWidget, Widget, Wrap},
+};
+use ratatui_image::StatefulImage;
+use rfd::FileDialog;
+use segue_attacca_lib::music_library::Track;
+use tokio::sync::oneshot;
+
+use crate::{AppState, Event, KeyCode, assets::Asset};
+
+#[derive(Clone, Default)]
+pub struct TrackInspector {
+    pub track: Weak<RwLock<Track>>,
+    pub selected_field: TrackInspectorSelectedField,
+
+    pub editing_value: Option<String>,
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub enum TrackInspectorSelectedField {
+    #[default]
+    None,
+    Name,
+    Art,
+    Artist,
+    Tags,
+}
+
+impl TrackInspectorSelectedField {
+    pub fn next(self) -> Self {
+        match self {
+            Self::None => Self::Name,
+            Self::Name => Self::Art,
+            Self::Art => Self::Artist,
+            Self::Artist => Self::Tags,
+            Self::Tags => Self::None,
+        }
+    }
+
+    pub fn prev(self) -> Self {
+        match self {
+            Self::None => Self::Tags,
+            Self::Name => Self::None,
+            Self::Art => Self::Name,
+            Self::Artist => Self::Art,
+            Self::Tags => Self::Artist,
+        }
+    }
+}
+
+impl TrackInspector {
+    pub fn new(track: Weak<RwLock<Track>>) -> Self {
+        Self {
+            track,
+            ..Default::default()
+        }
+    }
+}
+
+impl Display for TrackInspector {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(lock) = self.track.upgrade() {
+            if let Ok(track) = lock.read() {
+                write!(f, "{}", track.name)
+            } else {
+                write!(f, "error")
+            }
+        } else {
+            write!(f, "error")
+        }
+    }
+}
+
+impl<'a> From<&TrackInspector> for Text<'a> {
+    fn from(value: &TrackInspector) -> Self {
+        Text::from(format!("{value}"))
+    }
+}
+
+impl StatefulWidget for TrackInspector {
+    type State = AppState;
+    fn render(
+        self,
+        area: ratatui::prelude::Rect,
+        buf: &mut ratatui::prelude::Buffer,
+        state: &mut AppState,
+    ) {
+        let width = area.width;
+
+        let (name, artist, path, tags_list);
+        let art = if let Some(lock) = self.track.upgrade() {
+            let track = lock
+                .read()
+                .expect("couldn't read track in track inspector's render method");
+            name = track.name.clone();
+            artist = track.artist.clone();
+            path = track.path.clone();
+            tags_list = track.tags.clone();
+            let art_path = track.album_art.as_ref();
+
+            if let Some(path) = art_path {
+                if let Some(asset) = state.images.get_mut(path) {
+                    match asset {
+                        Asset::Some(_) | Asset::LoadError(_) | Asset::None => Some(asset),
+                        Asset::Loading(receiver) => {
+                            if let Ok(image) = receiver.try_recv() {
+                                *asset = Asset::Some(image);
+                            }
+                            Some(asset)
+                        }
+                        Asset::Unloaded => {
+                            let (tx, rx) = oneshot::channel();
+                            *asset = Asset::Loading(rx);
+
+                            let path = path.clone();
+                            let picker = state.picker.clone();
+                            let state_tx = state.event_tx.clone();
+                            tokio::spawn(async move {
+                                let _ = state_tx.send(Event::Redraw).await;
+                                let buffer = tokio::fs::read(path)
+                                    .await
+                                    .expect("couldn't open image at {path}");
+                                let image = image::load_from_memory(&buffer)
+                                    .expect("couldn't load image from memory");
+                                let protocol = tokio::task::spawn_blocking(move || {
+                                    picker.new_resize_protocol(image)
+                                })
+                                .await
+                                .expect("join error");
+                                let _ = tx.send(protocol);
+                                let _ = state_tx.send(Event::Redraw).await;
+                            });
+
+                            Some(asset)
+                        }
+                    }
+                } else {
+                    state.images.insert(path.clone(), Asset::Unloaded);
+                    Some(
+                        state
+                            .images
+                            .get_mut(path)
+                            .expect("i'm pretty sure this is impossible"),
+                    )
+                }
+            } else {
+                None
+            }
+        } else {
+            name = "".into();
+            artist = None;
+            path = "".into();
+            tags_list = Vec::new();
+            None
+        };
+        let tags = tags_list.join(", ");
+        let all_tags = state.library.tags.clone();
+
+        let title: Vec<String> = textwrap::wrap(name.as_ref(), width as usize)
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+        let artist_wrapped_len = if let Some(artist_ref) = artist.clone() {
+            textwrap::wrap(format!("artist: {artist_ref}").as_ref(), width as usize)
+                .iter()
+                .map(|l| l.to_string())
+                .len()
+        } else {
+            1
+        };
+        let tags_text = format!("tags: {tags}");
+        let tags_wrapped = textwrap::wrap(&tags_text, width as usize);
+        let path_text = format!("path: {path}");
+        let path_wrapped = textwrap::wrap(path_text.as_ref(), width as usize);
+
+        let editing_tags = self.selected_field == TrackInspectorSelectedField::Tags
+            && self.editing_value.is_some();
+
+        let tags_list = if let Some(value) = self.editing_value.clone() {
+            let mut list: Vec<Rc<str>> = all_tags
+                .iter()
+                .filter(|tag| !tags_list.contains(*tag))
+                .filter(|tag| {
+                    let matcher = SkimMatcherV2::default();
+                    if let Some(_score) = matcher.fuzzy_match(tag, value.as_str()) {
+                        return true;
+                    }
+                    false
+                })
+                .cloned()
+                .collect();
+            list.sort_by_key(Rc::strong_count);
+            list.sort_by_key(|tag| {
+                let matcher = SkimMatcherV2::default();
+                matcher.fuzzy_match(tag, value.as_str()).unwrap_or(i64::MAX)
+            });
+            list
+        } else {
+            tags_list
+        };
+        let tags_list: Vec<String> = tags_list.iter().map(|tag| tag.to_string()).collect();
+
+        use ratatui::prelude::Constraint as c;
+        let art_constraint = if let Some(Asset::Some(_)) = art {
+            u16::min(20, width)
+        } else {
+            1
+        };
+        let tag_editor_constraint = if editing_tags { 2 + tags_list.len() } else { 0 };
+        let [
+            title_area,
+            art_area,
+            artist_area,
+            tags_area,
+            path_area,
+            _,
+            tag_editor_area,
+            edit_area,
+        ] = Layout::vertical([
+            c::Length(title.len() as u16),
+            c::Length(art_constraint),
+            c::Length(artist_wrapped_len as u16),
+            c::Length(tags_wrapped.len() as u16),
+            c::Length(path_wrapped.len() as u16),
+            c::Fill(1),
+            c::Length(tag_editor_constraint as u16),
+            c::Length(3),
+        ])
+        .areas(area);
+
+        let mut title = Paragraph::new(name.to_string()).wrap(Wrap { trim: false });
+        let mut artist = if let Some(artist) = artist.as_ref() {
+            let artist = artist.clone();
+            Paragraph::new(format!("artist: {artist}")).wrap(Wrap { trim: false })
+        } else {
+            Paragraph::new("artist:").wrap(Wrap { trim: false })
+        };
+        let mut tags = Paragraph::new(tags_text).wrap(Wrap { trim: false });
+        let path = Paragraph::new(path_text)
+            .wrap(Wrap { trim: false })
+            .fg(Color::Gray);
+
+        let mut edit_message = vec![
+            Span::from("press "),
+            Span::from("enter").fg(Color::Green),
+            Span::from(" to edit value"),
+        ];
+        match self.selected_field {
+            TrackInspectorSelectedField::None => (),
+            TrackInspectorSelectedField::Name => title = title.fg(Color::Green),
+            TrackInspectorSelectedField::Art => {
+                edit_message = vec![
+                    Span::from("press "),
+                    Span::from("enter").fg(Color::Green),
+                    Span::from(" to select image"),
+                ]
+            }
+            TrackInspectorSelectedField::Artist => artist = artist.fg(Color::Green),
+            TrackInspectorSelectedField::Tags => {
+                tags = tags.fg(Color::Green);
+                edit_message = vec![
+                    Span::from("press "),
+                    Span::from("enter").fg(Color::Green),
+                    Span::from(" to insert tag or "),
+                    Span::from("x").fg(Color::Red),
+                    Span::from(" to clear all tags"),
+                ];
+            }
+        }
+        if self.selected_field != TrackInspectorSelectedField::None {
+            if let Some(value) = self.editing_value {
+                Paragraph::new(value)
+                    .block(Block::bordered().border_type(BorderType::Rounded))
+                    .fg(Color::Green)
+                    .render(edit_area, buf);
+            } else {
+                Paragraph::new(Line::from(edit_message))
+                    .wrap(Wrap { trim: false })
+                    .block(Block::bordered().border_type(BorderType::Rounded))
+                    .render(edit_area, buf);
+            }
+        }
+
+        let known_tags = List::new(tags_list)
+            .block(
+                Block::bordered()
+                    .border_type(BorderType::Rounded)
+                    .title("known tags")
+                    .title_bottom(vec![
+                        Span::from("press "),
+                        Span::from("tab").fg(Color::Yellow),
+                        Span::from(" to accept suggestion"),
+                    ])
+                    .title_alignment(ratatui::layout::Alignment::Center),
+            )
+            .highlight_style(Style::new().fg(Color::Yellow))
+            .fg(Color::Gray);
+        let mut list_state = ListState::default();
+        list_state.select_previous();
+
+        title.render(title_area, buf);
+        artist.render(artist_area, buf);
+        path.render(path_area, buf);
+        ratatui::prelude::StatefulWidget::render(known_tags, tag_editor_area, buf, &mut list_state);
+        tags.render(tags_area, buf);
+
+        if let Some(art) = art {
+            let art_area = if self.selected_field == TrackInspectorSelectedField::Art {
+                let block = Block::bordered()
+                    .border_type(BorderType::Rounded)
+                    .fg(Color::Green);
+                let new_area = block.inner(art_area);
+                block.render(art_area, buf);
+                new_area
+            } else {
+                art_area
+            };
+            match art {
+                Asset::Some(art) => {
+                    StatefulImage::default().render(art_area, buf, art);
+                }
+                Asset::Loading(_) => Paragraph::new("loading").render(art_area, buf),
+                Asset::Unloaded => Paragraph::new("unloaded").render(art_area, buf),
+                Asset::LoadError(e) => {
+                    Paragraph::new(format!("Couldn't load image: {e}")).render(art_area, buf)
+                }
+                Asset::None => Paragraph::new("no album art")
+                    .fg(Color::Yellow)
+                    .render(art_area, buf),
+            }
+        } else {
+            let mut art = Paragraph::new("no album art").fg(Color::Yellow);
+            if self.selected_field == TrackInspectorSelectedField::Art {
+                art = art.fg(Color::Green);
+            }
+            art.render(art_area, buf);
+        }
+    }
+}
+
+pub fn handle_inspector_events(event: &Event, state: &mut AppState) -> bool {
+    match event {
+        Event::KeyPressed(KeyCode::Enter, _) => {
+            if let Some(inspector) = state.track_inspector.as_mut() {
+                if let Some(value) = inspector.editing_value.as_ref() {
+                    if let Some(lock) = inspector.track.upgrade() {
+                        if let Ok(mut track) = lock.write() {
+                            match inspector.selected_field {
+                                TrackInspectorSelectedField::None => return false,
+                                TrackInspectorSelectedField::Name => {
+                                    track.name = value.as_str().into();
+                                }
+                                TrackInspectorSelectedField::Art => return false,
+                                TrackInspectorSelectedField::Artist => {
+                                    if value.as_str() != "" {
+                                        track.artist = Some(value.as_str().into());
+                                    } else {
+                                        track.artist = None;
+                                    }
+                                }
+                                TrackInspectorSelectedField::Tags => {
+                                    if value.as_str() != "" {
+                                        drop(track);
+                                        state.library.add_tag(&lock, value);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    inspector.editing_value = None;
+                    return true;
+                } else if let Some(lock) = inspector.track.upgrade() {
+                    if let Ok(mut track) = lock.write() {
+                        let value = match inspector.selected_field {
+                            TrackInspectorSelectedField::None => String::new(),
+                            TrackInspectorSelectedField::Name => track.name.to_string(),
+                            TrackInspectorSelectedField::Art => {
+                                if let Some(path) = FileDialog::new().pick_file() {
+                                    track.album_art = Some(path.to_string_lossy().into());
+                                } else {
+                                    track.album_art = None;
+                                }
+                                return true;
+                            }
+                            TrackInspectorSelectedField::Artist => {
+                                if let Some(artist) = track.artist.as_ref() {
+                                    artist.to_string()
+                                } else {
+                                    String::new()
+                                }
+                            }
+                            TrackInspectorSelectedField::Tags => String::new(),
+                        };
+
+                        inspector.editing_value = Some(value);
+                    }
+                }
+            }
+            true
+        }
+        Event::KeyPressed(KeyCode::Char(c), _) => {
+            if let Some(inspector) = state.track_inspector.as_mut() {
+                let tags_selected = inspector.selected_field == TrackInspectorSelectedField::Tags;
+                if let Some(value) = inspector.editing_value.as_mut() {
+                    value.push(*c);
+                    return true;
+                } else {
+                    match c {
+                        'j' => {
+                            inspector.selected_field = inspector.selected_field.next();
+                            return true;
+                        }
+                        'k' => {
+                            inspector.selected_field = inspector.selected_field.prev();
+                            return true;
+                        }
+                        'x' => {
+                            if tags_selected {
+                                if let Some(track_lock) = inspector.track.upgrade() {
+                                    if let Ok(mut track) = track_lock.write() {
+                                        track.tags = Vec::new();
+                                        state.library.gc_tags();
+                                        return true;
+                                    }
+                                }
+                            }
+                        }
+                        _ => (),
+                    }
+                }
+            }
+            false
+        }
+        Event::KeyPressed(KeyCode::Backspace, _) => {
+            if let Some(inspector) = state.track_inspector.as_mut() {
+                if let Some(value) = inspector.editing_value.as_mut() {
+                    let _ = value.pop();
+                    return true;
+                }
+            }
+            false
+        }
+        Event::KeyPressed(KeyCode::Tab, _) => {
+            if let Some(inspector) = state.track_inspector.as_mut() {
+                if let Some(value) = inspector.editing_value.as_mut() {
+                    if let Some(lock) = inspector.track.upgrade() {
+                        if let Ok(track) = lock.read() {
+                            let tags = &track.tags;
+                            let tags_list =
+                                if inspector.selected_field == TrackInspectorSelectedField::Tags {
+                                    let mut list: Vec<Rc<str>> = state
+                                        .library
+                                        .tags
+                                        .iter()
+                                        .filter(|tag| !tags.contains(*tag))
+                                        .filter(|tag| {
+                                            let matcher = SkimMatcherV2::default();
+                                            if let Some(_score) =
+                                                matcher.fuzzy_match(tag, value.as_str())
+                                            {
+                                                return true;
+                                            }
+                                            false
+                                        })
+                                        .cloned()
+                                        .collect();
+                                    list.sort_by_key(Rc::strong_count);
+                                    list.sort_by_key(|tag| {
+                                        let matcher = SkimMatcherV2::default();
+                                        matcher.fuzzy_match(tag, value.as_str()).unwrap_or(i64::MAX)
+                                    });
+                                    list
+                                } else {
+                                    return false;
+                                };
+                            let mut tags_list: Vec<String> =
+                                tags_list.iter().map(|tag| tag.to_string()).collect();
+
+                            if let Some(tag) = tags_list.pop() {
+                                *value = tag;
+                            }
+                            return true;
+                        }
+                    }
+                }
+            }
+            false
+        }
+        Event::KeyPressed(KeyCode::Escape, _) => {
+            if let Some(inspector) = state.track_inspector.as_mut() {
+                inspector.editing_value = None;
+                return true;
+            }
+            false
+        }
+        _ => false,
+    }
+}
