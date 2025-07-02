@@ -1,7 +1,8 @@
 use std::{
+    collections::HashMap,
     ffi::OsStr,
     fs::{DirEntry, File, read_dir},
-    io::BufReader,
+    io::{BufReader, Write},
     path::Path,
     rc::Rc,
     sync::RwLock,
@@ -13,7 +14,7 @@ use tracing::{info, warn};
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct MusicLibrary {
-    path: Box<str>,
+    pub path: Box<str>,
     tracks: Vec<Rc<RwLock<Track>>>,
     playlists: Vec<Rc<RwLock<Playlist>>>,
     tags: Vec<Rc<str>>,
@@ -23,7 +24,9 @@ impl MusicLibrary {
     pub fn new_from_path(path: &str) -> Result<MusicLibrary> {
         let mut lib = MusicLibrary {
             path: path.into(),
-            ..Default::default()
+            tracks: Vec::new(),
+            playlists: Vec::new(),
+            tags: Vec::new(),
         };
 
         let dir = read_dir(path)?;
@@ -124,11 +127,46 @@ impl MusicLibrary {
             }
         }
 
+        let mut artists = HashMap::<String, Rc<str>>::new();
+        let mut tags = HashMap::<String, Rc<str>>::new();
+        for track in lib.tracks.clone() {
+            if let Ok(mut track) = track.write() {
+                if let Some(artist) = track.artist.as_ref() {
+                    if let Some(artist_dedupe) = artists.get(artist.as_ref()) {
+                        track.artist = Some(Rc::clone(artist_dedupe));
+                    } else {
+                        artists.insert(artist.as_ref().to_string(), Rc::clone(artist));
+                    }
+                }
+                let mut tags_dedup = Vec::new();
+                for tag in track.tags.clone() {
+                    if let Some(tag_dedup) = tags.get(tag.as_ref()) {
+                        tags_dedup.push(Rc::clone(tag_dedup));
+                    } else {
+                        tags.insert(tag.as_ref().to_string(), Rc::clone(&tag));
+                        tags_dedup.push(Rc::clone(&tag));
+                    }
+                }
+                track.tags = tags_dedup;
+            }
+        }
+
         Ok(lib)
     }
 
     pub fn get_tracks(&self) -> &[Rc<RwLock<Track>>] {
         &self.tracks
+    }
+}
+
+impl Drop for MusicLibrary {
+    fn drop(&mut self) {
+        if let Ok(json) = serde_json::to_vec_pretty(self) {
+            let path = &self.path;
+            if let Ok(mut file) = File::create(format!("{path}/music_library.json")) {
+                let _ = file.write_all(json.as_ref());
+            }
+        }
     }
 }
 
