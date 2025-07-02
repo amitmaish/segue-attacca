@@ -10,7 +10,7 @@ use std::{
 use color_eyre::Result;
 use ratatui::{
     DefaultTerminal, Frame,
-    crossterm::event::{self, Event as CE},
+    crossterm::event::{self, Event as CE, KeyModifiers},
     layout::{Constraint, Layout},
     prelude::Text,
     style::{Color, Style, Stylize},
@@ -54,41 +54,26 @@ async fn run(mut terminal: DefaultTerminal, state: &mut AppState) -> Result<()> 
     loop {
         terminal.draw(|f| render(f, state))?;
         if let Some(event) = state.event_rx.recv().await {
+            let handled = match state.selected_panel {
+                SelectedPanel::TrackList => handle_track_list_events(&event, state),
+                SelectedPanel::Inspector => handle_inspector_events(&event, state),
+            };
+            if handled {
+                continue;
+            }
             match event {
-                Event::KeyPressed(key_code) => match key_code {
-                    KeyCode::Escape | KeyCode::Char('q') => break Ok(()),
-                    KeyCode::Char(c) => match c {
-                        'j' => {
-                            state.list_state.select_next();
-                            if let Some(track) = state
-                                .library
-                                .get_tracks()
-                                .get(state.list_state().selected().unwrap_or(0))
-                            {
-                                state.selected_track = Some(Rc::clone(track));
-                            } else {
-                                state.selected_track = None;
-                            }
-                        }
-                        'k' => {
-                            state.list_state.select_previous();
-                            if let Some(track) = state
-                                .library
-                                .get_tracks()
-                                .get(state.list_state().selected().unwrap_or(0))
-                            {
-                                state.selected_track = Some(Rc::clone(track));
-                            } else {
-                                state.selected_track = None;
-                            }
-                        }
-                        '1' => state.selected_panel = SelectedPanel::TrackList,
-                        '2' => state.selected_panel = SelectedPanel::Inspector,
+                Event::KeyPressed(KeyCode::Escape, _)
+                | Event::KeyPressed(KeyCode::Char('q'), _) => {
+                    break Ok(());
+                }
 
-                        _ => continue,
-                    },
+                Event::KeyPressed(KeyCode::Char(c), _) => match c {
+                    '1' => state.selected_panel = SelectedPanel::TrackList,
+                    '2' => state.selected_panel = SelectedPanel::Inspector,
+
+                    _ => continue,
                 },
-                Event::Redraw => continue,
+                _ => continue,
             }
         }
     }
@@ -96,12 +81,29 @@ async fn run(mut terminal: DefaultTerminal, state: &mut AppState) -> Result<()> 
 
 fn handle_terminal_events(tx: Sender<Event>) -> Result<()> {
     loop {
-        match event::read()? {
+        let event = event::read()?;
+        match event {
             CE::FocusGained => (),
             CE::FocusLost => (),
             CE::Key(key_event) => match key_event.code {
-                event::KeyCode::Backspace => (),
-                event::KeyCode::Enter => (),
+                event::KeyCode::Backspace => {
+                    if (tx.blocking_send(Event::KeyPressed(KeyCode::Backspace, Modifiers::NONE)))
+                        .is_ok()
+                        && tx.blocking_send(Event::Redraw).is_ok()
+                    {
+                        continue;
+                    }
+                    break Ok(());
+                }
+                event::KeyCode::Enter => {
+                    if (tx.blocking_send(Event::KeyPressed(KeyCode::Enter, Modifiers::NONE)))
+                        .is_ok()
+                        && tx.blocking_send(Event::Redraw).is_ok()
+                    {
+                        continue;
+                    }
+                    break Ok(());
+                }
                 event::KeyCode::Left => (),
                 event::KeyCode::Right => (),
                 event::KeyCode::Up => (),
@@ -110,13 +112,27 @@ fn handle_terminal_events(tx: Sender<Event>) -> Result<()> {
                 event::KeyCode::End => (),
                 event::KeyCode::PageUp => (),
                 event::KeyCode::PageDown => (),
-                event::KeyCode::Tab => (),
+                event::KeyCode::Tab => {
+                    if (tx.blocking_send(Event::KeyPressed(KeyCode::Tab, Modifiers::NONE))).is_ok()
+                        && tx.blocking_send(Event::Redraw).is_ok()
+                    {
+                        continue;
+                    }
+                    break Ok(());
+                }
                 event::KeyCode::BackTab => (),
                 event::KeyCode::Delete => (),
                 event::KeyCode::Insert => (),
                 event::KeyCode::F(_) => (),
                 event::KeyCode::Char(c) => {
-                    if (tx.blocking_send(Event::KeyPressed(KeyCode::Char(c)))).is_ok()
+                    let mods = key_event.modifiers;
+                    let mods = Modifiers {
+                        shift: mods.contains(KeyModifiers::SHIFT),
+                        ctrl: mods.contains(KeyModifiers::CONTROL),
+                        alt: mods.contains(KeyModifiers::ALT),
+                        hyper: mods.contains(KeyModifiers::HYPER),
+                    };
+                    if (tx.blocking_send(Event::KeyPressed(KeyCode::Char(c), mods))).is_ok()
                         && tx.blocking_send(Event::Redraw).is_ok()
                     {
                         continue;
@@ -125,7 +141,8 @@ fn handle_terminal_events(tx: Sender<Event>) -> Result<()> {
                 }
                 event::KeyCode::Null => (),
                 event::KeyCode::Esc => {
-                    if (tx.blocking_send(Event::KeyPressed(KeyCode::Escape))).is_ok()
+                    if (tx.blocking_send(Event::KeyPressed(KeyCode::Escape, Modifiers::NONE)))
+                        .is_ok()
                         && tx.blocking_send(Event::Redraw).is_ok()
                     {
                         continue;
@@ -149,6 +166,104 @@ fn handle_terminal_events(tx: Sender<Event>) -> Result<()> {
     }
 }
 
+fn handle_track_list_events(event: &Event, state: &mut AppState) -> bool {
+    match event {
+        Event::KeyPressed(KeyCode::Char(c), _) => match c {
+            'j' => {
+                state.list_state.select_next();
+                if let Some(track) = state
+                    .library
+                    .get_tracks()
+                    .get(state.list_state().selected().unwrap_or(0))
+                {
+                    state.track_inspector = Some(TrackInspector::new(Rc::downgrade(track)));
+                } else {
+                    state.track_inspector = None;
+                }
+                true
+            }
+            'k' => {
+                state.list_state.select_previous();
+                if let Some(track) = state
+                    .library
+                    .get_tracks()
+                    .get(state.list_state().selected().unwrap_or(0))
+                {
+                    state.track_inspector = Some(TrackInspector::new(Rc::downgrade(track)));
+                } else {
+                    state.track_inspector = None;
+                }
+                true
+            }
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn handle_inspector_events(event: &Event, state: &mut AppState) -> bool {
+    match event {
+        Event::KeyPressed(KeyCode::Tab, modifier) => {
+            if let Some(inspector) = state.track_inspector.as_mut() {
+                if modifier.shift {
+                    inspector.selected_field = inspector.selected_field.prev();
+                } else {
+                    inspector.selected_field = inspector.selected_field.next();
+                }
+            }
+            true
+        }
+        Event::KeyPressed(KeyCode::Enter, _) => {
+            if let Some(inspector) = state.track_inspector.as_mut() {
+                if let Some(value) = inspector.editing_value.as_ref() {
+                    if let Some(lock) = inspector.track.upgrade() {
+                        if let Ok(mut track) = lock.write() {
+                            match inspector.selected_field {
+                                TrackInspectorSelectedField::None => (),
+                                TrackInspectorSelectedField::Name => {
+                                    track.name = value.as_str().into()
+                                }
+                                TrackInspectorSelectedField::Art => (),
+                                TrackInspectorSelectedField::Artist => {
+                                    if value.as_str() != "" {
+                                        track.artist = Some(value.as_str().into());
+                                    } else {
+                                        track.artist = None;
+                                    }
+                                }
+                                TrackInspectorSelectedField::Tags => (),
+                            }
+                        }
+                    }
+                    inspector.editing_value = None;
+                } else {
+                    inspector.editing_value = Some(String::new());
+                }
+            }
+            true
+        }
+        Event::KeyPressed(KeyCode::Char(c), _) => {
+            if let Some(inspector) = state.track_inspector.as_mut() {
+                if let Some(value) = inspector.editing_value.as_mut() {
+                    value.push(*c);
+                    return true;
+                }
+            }
+            false
+        }
+        Event::KeyPressed(KeyCode::Backspace, _) => {
+            if let Some(inspector) = state.track_inspector.as_mut() {
+                if let Some(value) = inspector.editing_value.as_mut() {
+                    let _ = value.pop();
+                    return true;
+                }
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
 fn render(frame: &mut Frame, state: &mut AppState) {
     let layout = Layout::horizontal([Constraint::Fill(3), Constraint::Fill(1)]);
     let [list_area, inspector_area] = layout.areas(frame.area());
@@ -160,7 +275,7 @@ fn render(frame: &mut Frame, state: &mut AppState) {
                 .border_type(BorderType::Rounded),
         )
         .fg(DEFAULT_COLOR)
-        .highlight_style(Style::new().reversed())
+        .highlight_style(Style::new().fg(Color::Green))
         .repeat_highlight_symbol(true);
     let mut inspector = Block::bordered()
         .title(" [2] inspector ")
@@ -177,9 +292,8 @@ fn render(frame: &mut Frame, state: &mut AppState) {
     frame.render_stateful_widget(list, list_area, state.list_state_mut());
     frame.render_widget(inspector, inspector_area);
 
-    if let Some(track) = state.selected_track.as_ref() {
-        let track_inspector = TrackInspector::new(Rc::downgrade(track));
-        frame.render_stateful_widget(track_inspector, inspector_inner, state);
+    if let Some(track_inspector) = state.track_inspector.as_ref() {
+        frame.render_stateful_widget(track_inspector.clone(), inspector_inner, state);
     } else {
         frame.render_widget(
             Block::bordered()
@@ -190,14 +304,52 @@ fn render(frame: &mut Frame, state: &mut AppState) {
     }
 }
 
-#[derive(Default)]
-struct TrackInspector {
+#[derive(Clone, Default)]
+pub struct TrackInspector {
     pub track: Weak<RwLock<Track>>,
+    pub selected_field: TrackInspectorSelectedField,
+
+    pub editing_value: Option<String>,
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub enum TrackInspectorSelectedField {
+    #[default]
+    None,
+    Name,
+    Art,
+    Artist,
+    Tags,
+}
+
+impl TrackInspectorSelectedField {
+    fn next(self) -> Self {
+        match self {
+            Self::None => Self::Name,
+            Self::Name => Self::Art,
+            Self::Art => Self::Artist,
+            Self::Artist => Self::Tags,
+            Self::Tags => Self::None,
+        }
+    }
+
+    fn prev(self) -> Self {
+        match self {
+            Self::None => Self::Tags,
+            Self::Name => Self::None,
+            Self::Art => Self::Name,
+            Self::Artist => Self::Art,
+            Self::Tags => Self::Artist,
+        }
+    }
 }
 
 impl TrackInspector {
     fn new(track: Weak<RwLock<Track>>) -> Self {
-        Self { track }
+        Self {
+            track,
+            ..Default::default()
+        }
     }
 }
 
@@ -231,7 +383,7 @@ impl StatefulWidget for TrackInspector {
     ) {
         let width = area.width;
 
-        let (name, artist, path, _tags);
+        let (name, artist, path, tags);
         let art = if let Some(lock) = self.track.upgrade() {
             let track = lock
                 .read()
@@ -239,7 +391,7 @@ impl StatefulWidget for TrackInspector {
             name = track.name.clone();
             artist = track.artist.clone();
             path = track.path.clone();
-            _tags = track.tags.clone();
+            tags = track.tags.clone();
             let art_path = track.album_art.as_ref();
 
             if let Some(path) = art_path {
@@ -294,8 +446,10 @@ impl StatefulWidget for TrackInspector {
             name = "".into();
             artist = None;
             path = "".into();
+            tags = Vec::new();
             None
         };
+        let tags = tags.join(", ");
 
         let title: Vec<String> = textwrap::wrap(name.as_ref(), width as usize)
             .iter()
@@ -309,43 +463,88 @@ impl StatefulWidget for TrackInspector {
         } else {
             1
         };
+        let tags_text = format!("tags: {tags}");
+        let tags_wrapped = textwrap::wrap(&tags_text, width as usize);
         let path_text = format!("path: {path}");
         let path_wrapped = textwrap::wrap(path_text.as_ref(), width as usize);
 
         use Constraint as c;
         let art_constraint = if let Some(Asset::Some(_)) = art {
-            c::Length(u16::min(20, width))
+            u16::min(20, width)
         } else {
-            c::Length(1)
+            1
         };
-        let [title_area, art_area, artist_area, path_area] = Layout::vertical([
+        let [
+            title_area,
+            art_area,
+            artist_area,
+            tags_area,
+            path_area,
+            _,
+            edit_area,
+        ] = Layout::vertical([
             c::Length(title.len() as u16),
-            art_constraint,
+            c::Length(art_constraint),
             c::Length(artist_wrapped_len as u16),
+            c::Length(tags_wrapped.len() as u16),
             c::Length(path_wrapped.len() as u16),
+            c::Fill(1),
+            c::Length(3),
         ])
         .areas(area);
 
-        Paragraph::new(name.to_string())
-            .wrap(Wrap { trim: false })
-            .render(title_area, buf);
-        if let Some(artist) = artist.as_ref() {
+        let mut title = Paragraph::new(name.to_string()).wrap(Wrap { trim: false });
+        let mut artist = if let Some(artist) = artist.as_ref() {
             let artist = artist.clone();
-            Paragraph::new(format!("artist: {artist}"))
-                .wrap(Wrap { trim: false })
-                .render(artist_area, buf);
+            Paragraph::new(format!("artist: {artist}")).wrap(Wrap { trim: false })
         } else {
-            Paragraph::new("artist:")
-                .wrap(Wrap { trim: false })
-                .render(artist_area, buf);
-        }
-        Paragraph::new(path_text)
+            Paragraph::new("artist:").wrap(Wrap { trim: false })
+        };
+        let mut tags = Paragraph::new(tags_text).wrap(Wrap { trim: false });
+        let path = Paragraph::new(path_text)
             .wrap(Wrap { trim: false })
-            .render(path_area, buf);
+            .fg(Color::Gray);
+
+        match self.selected_field {
+            TrackInspectorSelectedField::None => (),
+            TrackInspectorSelectedField::Name => title = title.fg(Color::Green),
+            TrackInspectorSelectedField::Art => (),
+            TrackInspectorSelectedField::Artist => artist = artist.fg(Color::Green),
+            TrackInspectorSelectedField::Tags => tags = tags.fg(Color::Green),
+        }
+        if self.selected_field != TrackInspectorSelectedField::None {
+            if let Some(value) = self.editing_value {
+                Paragraph::new(value)
+                    .block(Block::bordered().border_type(BorderType::Rounded))
+                    .fg(Color::Green)
+                    .render(edit_area, buf);
+            } else {
+                Paragraph::new("press enter to edit value")
+                    .block(Block::bordered().border_type(BorderType::Rounded))
+                    .render(edit_area, buf);
+            }
+        }
+
+        title.render(title_area, buf);
+        artist.render(artist_area, buf);
+        tags.render(tags_area, buf);
+        path.render(path_area, buf);
 
         if let Some(art) = art {
+            let art_area = if self.selected_field == TrackInspectorSelectedField::Art {
+                let block = Block::bordered()
+                    .border_type(BorderType::Rounded)
+                    .fg(Color::Green);
+                let new_area = block.inner(art_area);
+                block.render(art_area, buf);
+                new_area
+            } else {
+                art_area
+            };
             match art {
-                Asset::Some(art) => StatefulImage::default().render(art_area, buf, art),
+                Asset::Some(art) => {
+                    StatefulImage::default().render(art_area, buf, art);
+                }
                 Asset::Loading(_) => Paragraph::new("loading").render(art_area, buf),
                 Asset::Unloaded => Paragraph::new("unloaded").render(art_area, buf),
                 Asset::LoadError(e) => {
@@ -356,9 +555,11 @@ impl StatefulWidget for TrackInspector {
                     .render(art_area, buf),
             }
         } else {
-            Paragraph::new("no album art")
-                .fg(Color::Yellow)
-                .render(art_area, buf);
+            let mut art = Paragraph::new("no album art").fg(Color::Yellow);
+            if self.selected_field == TrackInspectorSelectedField::Art {
+                art = art.fg(Color::Green);
+            }
+            art.render(art_area, buf);
         }
     }
 }
@@ -367,11 +568,13 @@ pub struct AppState {
     pub library: MusicLibrary,
     list: Vec<TrackInspector>,
     list_state: ListState,
-    pub selected_track: Option<Rc<RwLock<Track>>>,
+    pub track_inspector: Option<TrackInspector>,
     pub images: HashMap<String, Asset<StatefulProtocol>>,
     pub selected_panel: SelectedPanel,
 
     pub picker: Picker,
+
+    pub shift: bool,
 
     event_rx: Receiver<Event>,
     event_tx: Sender<Event>,
@@ -385,10 +588,11 @@ impl Default for AppState {
             library: Default::default(),
             list: Default::default(),
             list_state: Default::default(),
-            selected_track: Default::default(),
+            track_inspector: Default::default(),
             images: Default::default(),
             selected_panel: Default::default(),
             picker,
+            shift: Default::default(),
             event_rx,
             event_tx,
         }
@@ -424,13 +628,32 @@ pub enum SelectedPanel {
 }
 
 pub enum Event {
-    KeyPressed(KeyCode),
+    KeyPressed(KeyCode, Modifiers),
     Redraw,
 }
 
 pub enum KeyCode {
+    Backspace,
     Char(char),
+    Enter,
     Escape,
+    Tab,
+}
+
+pub struct Modifiers {
+    pub shift: bool,
+    pub ctrl: bool,
+    pub alt: bool,
+    pub hyper: bool,
+}
+
+impl Modifiers {
+    const NONE: Modifiers = Modifiers {
+        shift: false,
+        ctrl: false,
+        alt: false,
+        hyper: false,
+    };
 }
 
 #[derive(Debug, Default, Display)]
