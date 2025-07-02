@@ -18,7 +18,7 @@ pub struct MusicLibrary {
     tracks: Vec<Rc<RwLock<Track>>>,
     playlists: Vec<Rc<RwLock<Playlist>>>,
     artists: Vec<Rc<str>>,
-    tags: Vec<Rc<str>>,
+    pub tags: Vec<Rc<str>>,
 }
 
 impl MusicLibrary {
@@ -167,6 +167,38 @@ impl MusicLibrary {
     pub fn get_tracks(&self) -> &[Rc<RwLock<Track>>] {
         &self.tracks
     }
+
+    pub fn add_tag(&mut self, track: &Rc<RwLock<Track>>, tag: &str) {
+        let known_tag = self
+            .tags
+            .iter()
+            .find(|known_tag| known_tag.as_ref() == tag)
+            .cloned();
+
+        if let Ok(mut track) = track.write() {
+            if let Some(tag) = known_tag {
+                track.tags.push(tag);
+            } else {
+                let tag: Rc<str> = tag.into();
+                self.tags.push(Rc::clone(&tag));
+                track.tags.push(Rc::clone(&tag));
+            }
+        }
+        self.tags.sort_by_key(|tag| tag.to_lowercase());
+    }
+
+    pub fn gc_tags(&mut self) {
+        let temp: Vec<(usize, Rc<str>)> = self
+            .tags
+            .iter()
+            .enumerate()
+            .filter(|(_, tag)| Rc::strong_count(tag) > 1)
+            .map(|(i, tag)| (i, Rc::clone(tag)))
+            .collect();
+        for (i, _) in temp {
+            self.tags.remove(i);
+        }
+    }
 }
 
 impl Drop for MusicLibrary {
@@ -187,6 +219,12 @@ pub struct Track {
     pub artist: Option<Rc<str>>,
     pub album_art: Option<String>,
     pub tags: Vec<Rc<str>>,
+}
+
+impl Track {
+    pub fn add_tag(&mut self, tag: &str) {
+        self.tags.push(tag.into());
+    }
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]

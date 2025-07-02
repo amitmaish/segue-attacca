@@ -8,6 +8,7 @@ use std::{
 };
 
 use color_eyre::Result;
+use fuzzy_matcher::{FuzzyMatcher, skim::SkimMatcherV2};
 use ratatui::{
     DefaultTerminal, Frame,
     crossterm::event::{self, Event as CE, KeyModifiers},
@@ -215,11 +216,11 @@ fn handle_inspector_events(event: &Event, state: &mut AppState) -> bool {
                     if let Some(lock) = inspector.track.upgrade() {
                         if let Ok(mut track) = lock.write() {
                             match inspector.selected_field {
-                                TrackInspectorSelectedField::None => (),
+                                TrackInspectorSelectedField::None => return false,
                                 TrackInspectorSelectedField::Name => {
-                                    track.name = value.as_str().into()
+                                    track.name = value.as_str().into();
                                 }
-                                TrackInspectorSelectedField::Art => (),
+                                TrackInspectorSelectedField::Art => return false,
                                 TrackInspectorSelectedField::Artist => {
                                     if value.as_str() != "" {
                                         track.artist = Some(value.as_str().into());
@@ -227,21 +228,24 @@ fn handle_inspector_events(event: &Event, state: &mut AppState) -> bool {
                                         track.artist = None;
                                     }
                                 }
-                                TrackInspectorSelectedField::Tags => (),
+                                TrackInspectorSelectedField::Tags => {
+                                    if value.as_str() != "" {
+                                        drop(track);
+                                        state.library.add_tag(&lock, value);
+                                    }
+                                }
                             }
                         }
                     }
                     inspector.editing_value = None;
+                    return true;
                 } else if let Some(lock) = inspector.track.upgrade() {
                     if let Ok(mut track) = lock.write() {
                         let value = match inspector.selected_field {
                             TrackInspectorSelectedField::None => String::new(),
                             TrackInspectorSelectedField::Name => track.name.to_string(),
                             TrackInspectorSelectedField::Art => {
-                                if let Some(path) = FileDialog::new()
-                                    .set_directory(state.library.path.as_ref())
-                                    .pick_file()
-                                {
+                                if let Some(path) = FileDialog::new().pick_file() {
                                     track.album_art = Some(path.to_string_lossy().into());
                                 } else {
                                     track.album_art = None;
@@ -266,13 +270,31 @@ fn handle_inspector_events(event: &Event, state: &mut AppState) -> bool {
         }
         Event::KeyPressed(KeyCode::Char(c), _) => {
             if let Some(inspector) = state.track_inspector.as_mut() {
+                let tags_selected = inspector.selected_field == TrackInspectorSelectedField::Tags;
                 if let Some(value) = inspector.editing_value.as_mut() {
                     value.push(*c);
                     return true;
                 } else {
                     match c {
-                        'j' => inspector.selected_field = inspector.selected_field.next(),
-                        'k' => inspector.selected_field = inspector.selected_field.prev(),
+                        'j' => {
+                            inspector.selected_field = inspector.selected_field.next();
+                            return true;
+                        }
+                        'k' => {
+                            inspector.selected_field = inspector.selected_field.prev();
+                            return true;
+                        }
+                        'x' => {
+                            if tags_selected {
+                                if let Some(track_lock) = inspector.track.upgrade() {
+                                    if let Ok(mut track) = track_lock.write() {
+                                        track.tags = Vec::new();
+                                        state.library.gc_tags();
+                                        return true;
+                                    }
+                                }
+                            }
+                        }
                         _ => (),
                     }
                 }
@@ -288,12 +310,56 @@ fn handle_inspector_events(event: &Event, state: &mut AppState) -> bool {
             }
             false
         }
+        Event::KeyPressed(KeyCode::Tab, _) => {
+            if let Some(inspector) = state.track_inspector.as_mut() {
+                if let Some(value) = inspector.editing_value.as_mut() {
+                    if let Some(lock) = inspector.track.upgrade() {
+                        if let Ok(track) = lock.read() {
+                            let tags = &track.tags;
+                            let tags_list =
+                                if inspector.selected_field == TrackInspectorSelectedField::Tags {
+                                    let mut list: Vec<Rc<str>> = state
+                                        .library
+                                        .tags
+                                        .iter()
+                                        .filter(|tag| !tags.contains(*tag))
+                                        .filter(|tag| {
+                                            let matcher = SkimMatcherV2::default();
+                                            if let Some(_score) =
+                                                matcher.fuzzy_match(tag, value.as_str())
+                                            {
+                                                return true;
+                                            }
+                                            false
+                                        })
+                                        .cloned()
+                                        .collect();
+                                    list.sort_by_key(Rc::strong_count);
+                                    list.sort_by_key(|tag| {
+                                        let matcher = SkimMatcherV2::default();
+                                        matcher.fuzzy_match(tag, value.as_str()).unwrap_or(i64::MAX)
+                                    });
+                                    list
+                                } else {
+                                    return false;
+                                };
+                            let mut tags_list: Vec<String> =
+                                tags_list.iter().map(|tag| tag.to_string()).collect();
+
+                            if let Some(tag) = tags_list.pop() {
+                                *value = tag;
+                            }
+                            return true;
+                        }
+                    }
+                }
+            }
+            false
+        }
         Event::KeyPressed(KeyCode::Escape, _) => {
             if let Some(inspector) = state.track_inspector.as_mut() {
-                if let Some(_value) = inspector.editing_value.as_mut() {
-                    inspector.editing_value = None;
-                    return true;
-                }
+                inspector.editing_value = None;
+                return true;
             }
             false
         }
@@ -420,7 +486,7 @@ impl StatefulWidget for TrackInspector {
     ) {
         let width = area.width;
 
-        let (name, artist, path, tags);
+        let (name, artist, path, tags_list);
         let art = if let Some(lock) = self.track.upgrade() {
             let track = lock
                 .read()
@@ -428,7 +494,7 @@ impl StatefulWidget for TrackInspector {
             name = track.name.clone();
             artist = track.artist.clone();
             path = track.path.clone();
-            tags = track.tags.clone();
+            tags_list = track.tags.clone();
             let art_path = track.album_art.as_ref();
 
             if let Some(path) = art_path {
@@ -483,10 +549,11 @@ impl StatefulWidget for TrackInspector {
             name = "".into();
             artist = None;
             path = "".into();
-            tags = Vec::new();
+            tags_list = Vec::new();
             None
         };
-        let tags = tags.join(", ");
+        let tags = tags_list.join(", ");
+        let all_tags = state.library.tags.clone();
 
         let title: Vec<String> = textwrap::wrap(name.as_ref(), width as usize)
             .iter()
@@ -505,12 +572,40 @@ impl StatefulWidget for TrackInspector {
         let path_text = format!("path: {path}");
         let path_wrapped = textwrap::wrap(path_text.as_ref(), width as usize);
 
+        let editing_tags = self.selected_field == TrackInspectorSelectedField::Tags
+            && self.editing_value.is_some();
+
+        let tags_list = if let Some(value) = self.editing_value.clone() {
+            let mut list: Vec<Rc<str>> = all_tags
+                .iter()
+                .filter(|tag| !tags_list.contains(*tag))
+                .filter(|tag| {
+                    let matcher = SkimMatcherV2::default();
+                    if let Some(_score) = matcher.fuzzy_match(tag, value.as_str()) {
+                        return true;
+                    }
+                    false
+                })
+                .cloned()
+                .collect();
+            list.sort_by_key(Rc::strong_count);
+            list.sort_by_key(|tag| {
+                let matcher = SkimMatcherV2::default();
+                matcher.fuzzy_match(tag, value.as_str()).unwrap_or(i64::MAX)
+            });
+            list
+        } else {
+            tags_list
+        };
+        let tags_list: Vec<String> = tags_list.iter().map(|tag| tag.to_string()).collect();
+
         use Constraint as c;
         let art_constraint = if let Some(Asset::Some(_)) = art {
             u16::min(20, width)
         } else {
             1
         };
+        let tag_editor_constraint = if editing_tags { 2 + tags_list.len() } else { 0 };
         let [
             title_area,
             art_area,
@@ -518,6 +613,7 @@ impl StatefulWidget for TrackInspector {
             tags_area,
             path_area,
             _,
+            tag_editor_area,
             edit_area,
         ] = Layout::vertical([
             c::Length(title.len() as u16),
@@ -526,6 +622,7 @@ impl StatefulWidget for TrackInspector {
             c::Length(tags_wrapped.len() as u16),
             c::Length(path_wrapped.len() as u16),
             c::Fill(1),
+            c::Length(tag_editor_constraint as u16),
             c::Length(3),
         ])
         .areas(area);
@@ -542,12 +639,16 @@ impl StatefulWidget for TrackInspector {
             .wrap(Wrap { trim: false })
             .fg(Color::Gray);
 
+        let mut edit_message = "press enter to edit value";
         match self.selected_field {
             TrackInspectorSelectedField::None => (),
             TrackInspectorSelectedField::Name => title = title.fg(Color::Green),
             TrackInspectorSelectedField::Art => (),
             TrackInspectorSelectedField::Artist => artist = artist.fg(Color::Green),
-            TrackInspectorSelectedField::Tags => tags = tags.fg(Color::Green),
+            TrackInspectorSelectedField::Tags => {
+                tags = tags.fg(Color::Green);
+                edit_message = "press x to clear tags and enter to add a tag"
+            }
         }
         if self.selected_field != TrackInspectorSelectedField::None {
             if let Some(value) = self.editing_value {
@@ -556,16 +657,28 @@ impl StatefulWidget for TrackInspector {
                     .fg(Color::Green)
                     .render(edit_area, buf);
             } else {
-                Paragraph::new("press enter to edit value")
+                Paragraph::new(edit_message)
                     .block(Block::bordered().border_type(BorderType::Rounded))
                     .render(edit_area, buf);
             }
         }
 
+        let known_tags = List::new(tags_list)
+            .block(
+                Block::bordered()
+                    .border_type(BorderType::Rounded)
+                    .title("known tags"),
+            )
+            .highlight_style(Style::new().fg(Color::Yellow))
+            .fg(Color::Gray);
+        let mut list_state = ListState::default();
+        list_state.select_previous();
+
         title.render(title_area, buf);
         artist.render(artist_area, buf);
-        tags.render(tags_area, buf);
         path.render(path_area, buf);
+        ratatui::prelude::StatefulWidget::render(known_tags, tag_editor_area, buf, &mut list_state);
+        tags.render(tags_area, buf);
 
         if let Some(art) = art {
             let art_area = if self.selected_field == TrackInspectorSelectedField::Art {

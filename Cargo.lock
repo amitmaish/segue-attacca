@@ -2425,6 +2425,7 @@ name = "segue-attacca-lib"
 version = "0.1.0"
 dependencies = [
  "color-eyre",
+ "rayon",
  "rodio",
  "serde",
  "serde_json",
