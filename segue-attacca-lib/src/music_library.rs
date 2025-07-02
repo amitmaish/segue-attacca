@@ -17,6 +17,7 @@ pub struct MusicLibrary {
     pub path: Box<str>,
     tracks: Vec<Rc<RwLock<Track>>>,
     playlists: Vec<Rc<RwLock<Playlist>>>,
+    artists: Vec<Rc<str>>,
     tags: Vec<Rc<str>>,
 }
 
@@ -26,6 +27,7 @@ impl MusicLibrary {
             path: path.into(),
             tracks: Vec::new(),
             playlists: Vec::new(),
+            artists: Vec::new(),
             tags: Vec::new(),
         };
 
@@ -129,8 +131,10 @@ impl MusicLibrary {
 
         let mut artists = HashMap::<String, Rc<str>>::new();
         let mut tags = HashMap::<String, Rc<str>>::new();
-        for track in lib.tracks.clone() {
-            if let Ok(mut track) = track.write() {
+        let mut tracks = HashMap::<String, Rc<RwLock<Track>>>::new();
+        for track_lock in lib.tracks.clone() {
+            if let Ok(mut track) = track_lock.write() {
+                tracks.insert(track.path.to_string(), Rc::clone(&track_lock));
                 if let Some(artist) = track.artist.as_ref() {
                     if let Some(artist_dedupe) = artists.get(artist.as_ref()) {
                         track.artist = Some(Rc::clone(artist_dedupe));
@@ -150,6 +154,12 @@ impl MusicLibrary {
                 track.tags = tags_dedup;
             }
         }
+
+        // TODO deduplicate playlists. maybe only deduplicate playlists with names and treat other
+        // playlists as inline playlists?
+
+        lib.artists = artists.values().cloned().collect();
+        lib.tags = tags.values().cloned().collect();
 
         Ok(lib)
     }
