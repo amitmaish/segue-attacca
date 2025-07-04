@@ -9,8 +9,10 @@ use std::{
 
 use color_eyre::Result;
 use rayon::prelude::*;
+use scc::HashMap;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
+use uuid::Uuid;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct MusicLibrary {
@@ -132,7 +134,7 @@ impl MusicLibrary {
         let artists = scc::HashMap::with_hasher(RandomState::new());
         let tags = scc::HashMap::with_hasher(RandomState::new());
         let tracks = scc::HashMap::with_hasher(RandomState::new());
-        // let playlists = scc::HashMap::with_hasher(RandomState::new());
+        let playlists = scc::HashMap::with_hasher(RandomState::new());
 
         lib.tracks.clone().par_iter().for_each(|track_lock| {
             if let Ok(mut track) = track_lock.write() {
@@ -163,19 +165,63 @@ impl MusicLibrary {
                 track.tags = tags_dedup;
             }
         });
-        // lib.playlists
-        //     .clone()
-        //     .par_iter()
-        //     .for_each(move |playlist_lock| {
-        //         if let Ok(mut playlist) = playlist_lock.write() {
-        //             let playlist_items_dedup =
-        //                 Vec::from_par_iter(playlist.items.par_iter().map(|item| match item {
-        //                     PlaylistItem::Track(rw_lock) => todo!(),
-        //                     PlaylistItem::Playlist(weak) => todo!(),
-        //                 }));
-        //             playlist.items = playlist_items_dedup;
-        //         }
-        //     });
+        lib.playlists.par_iter().for_each(|playlist_lock| {
+            if let Ok(playlist) = playlist_lock.read() {
+                if playlists
+                    .insert(playlist.uuid, Arc::clone(playlist_lock))
+                    .is_err()
+                {
+                    unreachable!()
+                }
+            }
+        });
+        lib.playlists.par_iter().for_each(|playlist_lock| {
+            if let Ok(mut playlist) = playlist_lock.write() {
+                fn dedup_item(
+                    item: &PlaylistItem,
+                    tracks: &HashMap<String, Arc<RwLock<Track>>>,
+                    playlists: &HashMap<Uuid, Arc<RwLock<Playlist>>>,
+                ) -> Option<PlaylistItem> {
+                    match item {
+                        PlaylistItem::Track(rw_lock) => {
+                            if let Ok(track) = rw_lock.read() {
+                                tracks
+                                    .read(&track.path.to_string(), |_, track| Arc::clone(track))
+                                    .map(PlaylistItem::Track)
+                            } else {
+                                unreachable!()
+                            }
+                        }
+                        PlaylistItem::Playlist(weak) => {
+                            if let Some(playlist_lock) = weak.upgrade() {
+                                if let Ok(playlist_read) = playlist_lock.read() {
+                                    playlists
+                                        .read(&playlist_read.uuid, |_, v| Arc::downgrade(v))
+                                        .map(PlaylistItem::Playlist)
+                                } else {
+                                    unreachable!()
+                                }
+                            } else {
+                                None
+                            }
+                        }
+                        PlaylistItem::Block(playlist_items) => {
+                            let items_dedup = playlist_items
+                                .par_iter()
+                                .filter_map(|item| dedup_item(item, tracks, playlists))
+                                .collect();
+                            Some(PlaylistItem::Block(items_dedup))
+                        }
+                    }
+                }
+
+                playlist.items = playlist
+                    .items
+                    .par_iter()
+                    .filter_map(|item| dedup_item(item, &tracks, &playlists))
+                    .collect();
+            }
+        });
 
         let mut temp = Vec::new();
         artists.scan(|_k, v| {
@@ -285,14 +331,27 @@ impl Hash for Track {
     }
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Playlist {
-    name: Option<Box<str>>,
+    name: Box<str>,
     items: Vec<PlaylistItem>,
+
+    uuid: Uuid,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+impl Default for Playlist {
+    fn default() -> Self {
+        Self {
+            name: Default::default(),
+            items: Default::default(),
+            uuid: Uuid::new_v4(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum PlaylistItem {
     Track(Arc<RwLock<Track>>),
     Playlist(Weak<RwLock<Playlist>>),
+    Block(Vec<PlaylistItem>),
 }
