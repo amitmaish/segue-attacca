@@ -1,24 +1,24 @@
 use std::{
-    collections::HashMap,
-    ffi::OsStr,
+    collections::HashSet,
     fs::{DirEntry, File, read_dir},
+    hash::{Hash, RandomState},
     io::{BufReader, Write},
     path::Path,
-    rc::Rc,
-    sync::RwLock,
+    sync::{Arc, RwLock, Weak},
 };
 
 use color_eyre::Result;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct MusicLibrary {
     pub path: Box<str>,
-    tracks: Vec<Rc<RwLock<Track>>>,
-    playlists: Vec<Rc<RwLock<Playlist>>>,
-    artists: Vec<Rc<str>>,
-    pub tags: Vec<Rc<str>>,
+    tracks: Vec<Arc<RwLock<Track>>>,
+    playlists: Vec<Arc<RwLock<Playlist>>>,
+    artists: Vec<Arc<str>>,
+    pub tags: Vec<Arc<str>>,
 }
 
 impl MusicLibrary {
@@ -36,6 +36,36 @@ impl MusicLibrary {
 
         let mut read_queue: Vec<DirEntry> = dir.flatten().collect();
 
+        match File::open(format!("{path}/music_library.json")) {
+            Ok(file) => {
+                info!("opened music_library.json");
+                let reader = BufReader::new(file);
+
+                match serde_json::from_reader(reader) {
+                    Ok(library) => {
+                        info!("successfully parsed json file");
+                        lib = library;
+                        if lib.path != path.into() {
+                            lib.path = path.into();
+                        }
+                    }
+                    Err(e) => warn!("couldn't parse json file: {e}"),
+                }
+            }
+            Err(e) => {
+                warn!("couldn't open json file {e}");
+            }
+        }
+
+        let mut visited_track_paths: HashSet<Box<str>> =
+            HashSet::from_par_iter(lib.tracks.clone().into_par_iter().map(|track| {
+                if let Ok(read) = track.read() {
+                    read.path.clone()
+                } else {
+                    "".into()
+                }
+            }));
+
         while let Some(item) = read_queue.pop() {
             let file_type;
             if let Ok(filetype) = item.file_type() {
@@ -45,40 +75,6 @@ impl MusicLibrary {
             }
             if file_type.is_file() {
                 let file_name = &item.file_name();
-
-                if file_name == OsStr::new("music_library.json") {
-                    info!("found music_library.json");
-                    let filename;
-                    if let Some(temp) = file_name.to_str() {
-                        filename = temp;
-                    } else {
-                        continue;
-                    }
-
-                    let file = match File::open(format!("{path}/{filename}")) {
-                        Ok(temp) => {
-                            info!("opened json file");
-                            temp
-                        }
-                        Err(err) => {
-                            warn!("couldn't open json file {err}");
-                            continue;
-                        }
-                    };
-                    let reader = BufReader::new(file);
-
-                    match serde_json::from_reader(reader) {
-                        Ok(library) => {
-                            info!("successfully parsed json file");
-                            lib = library;
-                            if lib.path != path.into() {
-                                lib.path = path.into();
-                            }
-                            break;
-                        }
-                        Err(e) => warn!("couldn't parse json file: {e}"),
-                    }
-                }
 
                 let extension;
                 if let Some(temp) = Path::new(file_name).extension() {
@@ -93,7 +89,7 @@ impl MusicLibrary {
                 } else {
                     continue;
                 }
-                if extension == "wav" || extension == "mp3" {
+                if extension == "wav" || extension == "mp3" || extension == "flac" {
                     let item_full_path = item.path();
                     let item_path;
                     if let Ok(no_prefix) = item_full_path.strip_prefix(prefix) {
@@ -108,13 +104,17 @@ impl MusicLibrary {
                         continue;
                     }
 
-                    let track = Rc::new(RwLock::new(Track {
-                        path: path.clone(),
-                        name,
-                        ..Default::default()
-                    }));
+                    if !visited_track_paths.contains(&path) {
+                        let track = Arc::new(RwLock::new(Track {
+                            path: path.clone(),
+                            name,
+                            ..Default::default()
+                        }));
 
-                    lib.tracks.push(Rc::clone(&track));
+                        visited_track_paths.insert(path);
+
+                        lib.tracks.push(Arc::clone(&track));
+                    }
                 }
             } else if file_type.is_dir() {
                 let dir;
@@ -129,46 +129,74 @@ impl MusicLibrary {
             }
         }
 
-        let mut artists = HashMap::<String, Rc<str>>::new();
-        let mut tags = HashMap::<String, Rc<str>>::new();
-        let mut tracks = HashMap::<String, Rc<RwLock<Track>>>::new();
-        for track_lock in lib.tracks.clone() {
+        let artists = scc::HashMap::with_hasher(RandomState::new());
+        let tags = scc::HashMap::with_hasher(RandomState::new());
+        let tracks = scc::HashMap::with_hasher(RandomState::new());
+        // let playlists = scc::HashMap::with_hasher(RandomState::new());
+
+        lib.tracks.clone().par_iter().for_each(|track_lock| {
             if let Ok(mut track) = track_lock.write() {
-                tracks.insert(track.path.to_string(), Rc::clone(&track_lock));
-                if let Some(artist) = track.artist.as_ref() {
-                    if let Some(artist_dedupe) = artists.get(artist.as_ref()) {
-                        track.artist = Some(Rc::clone(artist_dedupe));
-                    } else {
-                        artists.insert(artist.as_ref().to_string(), Rc::clone(artist));
+                let _ = tracks.insert(track.path.to_string(), Arc::clone(track_lock));
+
+                let artist = track.artist.clone();
+                if let Some(artist) = artist {
+                    let artist_key = artist.to_string();
+                    if artists
+                        .insert(artist_key.clone(), Arc::clone(&artist))
+                        .is_err()
+                    {
+                        track.artist = artists.read(&artist_key, |_, v| v.clone());
                     }
                 }
-                let mut tags_dedup = Vec::new();
-                for tag in track.tags.clone() {
-                    if let Some(tag_dedup) = tags.get(tag.as_ref()) {
-                        tags_dedup.push(Rc::clone(tag_dedup));
+                let tags_dedup = Vec::from_par_iter(track.tags.clone().par_iter().map(|tag| {
+                    if tags.insert(tag.to_string(), Arc::clone(tag)).is_err() {
+                        let tag_key = tag.to_string();
+                        if let Some(tag_dedup) = tags.read(&tag_key, |_k, v| Arc::clone(v)) {
+                            tag_dedup
+                        } else {
+                            unreachable!()
+                        }
                     } else {
-                        tags.insert(tag.as_ref().to_string(), Rc::clone(&tag));
-                        tags_dedup.push(Rc::clone(&tag));
+                        Arc::clone(tag)
                     }
-                }
+                }));
                 track.tags = tags_dedup;
             }
-        }
+        });
+        // lib.playlists
+        //     .clone()
+        //     .par_iter()
+        //     .for_each(move |playlist_lock| {
+        //         if let Ok(mut playlist) = playlist_lock.write() {
+        //             let playlist_items_dedup =
+        //                 Vec::from_par_iter(playlist.items.par_iter().map(|item| match item {
+        //                     PlaylistItem::Track(rw_lock) => todo!(),
+        //                     PlaylistItem::Playlist(weak) => todo!(),
+        //                 }));
+        //             playlist.items = playlist_items_dedup;
+        //         }
+        //     });
 
-        // TODO deduplicate playlists. maybe only deduplicate playlists with names and treat other
-        // playlists as inline playlists?
+        let mut temp = Vec::new();
+        artists.scan(|_k, v| {
+            temp.push(Arc::clone(v));
+        });
+        lib.artists = temp;
 
-        lib.artists = artists.values().cloned().collect();
-        lib.tags = tags.values().cloned().collect();
+        let mut temp = Vec::new();
+        tags.scan(|_k, v| {
+            temp.push(Arc::clone(v));
+        });
+        lib.tags = temp;
 
         Ok(lib)
     }
 
-    pub fn get_tracks(&self) -> &[Rc<RwLock<Track>>] {
+    pub fn get_tracks(&self) -> &[Arc<RwLock<Track>>] {
         &self.tracks
     }
 
-    pub fn add_tag(&mut self, track: &Rc<RwLock<Track>>, tag: &str) {
+    pub fn add_tag(&mut self, track: &Arc<RwLock<Track>>, tag: &str) {
         let known_tag = self
             .tags
             .iter()
@@ -179,21 +207,21 @@ impl MusicLibrary {
             if let Some(tag) = known_tag {
                 track.tags.push(tag);
             } else {
-                let tag: Rc<str> = tag.into();
-                self.tags.push(Rc::clone(&tag));
-                track.tags.push(Rc::clone(&tag));
+                let tag: Arc<str> = tag.into();
+                self.tags.push(Arc::clone(&tag));
+                track.tags.push(Arc::clone(&tag));
             }
         }
         self.tags.sort_by_key(|tag| tag.to_lowercase());
     }
 
     pub fn gc_tags(&mut self) {
-        let temp: Vec<(usize, Rc<str>)> = self
+        let temp: Vec<(usize, Arc<str>)> = self
             .tags
             .iter()
             .enumerate()
-            .filter(|(_, tag)| Rc::strong_count(tag) > 1)
-            .map(|(i, tag)| (i, Rc::clone(tag)))
+            .filter(|(_, tag)| Arc::strong_count(tag) > 1)
+            .map(|(i, tag)| (i, Arc::clone(tag)))
             .collect();
         for (i, _) in temp {
             if i < self.tags.len() {
@@ -204,7 +232,7 @@ impl MusicLibrary {
 
         let mut indecies = Vec::new();
         for (i, tag) in self.tags.iter().enumerate() {
-            if Rc::strong_count(tag) > 1 {
+            if Arc::strong_count(tag) > 1 {
                 continue;
             } else {
                 indecies.push(i);
@@ -231,14 +259,29 @@ impl Drop for MusicLibrary {
 pub struct Track {
     pub path: Box<str>,
     pub name: Box<str>,
-    pub artist: Option<Rc<str>>,
+    pub artist: Option<Arc<str>>,
     pub album_art: Option<String>,
-    pub tags: Vec<Rc<str>>,
+    pub tags: Vec<Arc<str>>,
 }
 
 impl Track {
     pub fn add_tag(&mut self, tag: &str) {
         self.tags.push(tag.into());
+    }
+}
+
+impl Hash for Track {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.path.hash(state);
+        self.name.hash(state);
+        self.artist
+            .as_ref()
+            .map(|string| string.as_ref())
+            .hash(state);
+        self.album_art.hash(state);
+        let mut tags: Vec<&str> = self.tags.iter().map(|tag| tag.as_ref()).collect();
+        tags.sort_by_key(|t| t.to_lowercase());
+        tags.hash(state);
     }
 }
 
@@ -250,6 +293,6 @@ pub struct Playlist {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum PlaylistItem {
-    Track(Rc<RwLock<Track>>),
-    Playlist(Rc<RwLock<Playlist>>),
+    Track(Arc<RwLock<Track>>),
+    Playlist(Weak<RwLock<Playlist>>),
 }

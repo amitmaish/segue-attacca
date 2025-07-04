@@ -4,7 +4,7 @@ mod terminal_events;
 mod track_inspector;
 mod track_list;
 
-use std::{collections::HashMap, ops::Deref, rc::Rc, thread};
+use std::{collections::HashMap, ops::Deref, sync::Arc, thread};
 
 use assets::Asset;
 use color_eyre::Result;
@@ -44,7 +44,7 @@ async fn run(mut terminal: DefaultTerminal, state: &mut AppState) -> Result<()> 
         .library
         .get_tracks()
         .iter()
-        .map(|track| TrackInspector::new(Rc::downgrade(track)))
+        .map(|track| TrackInspector::new(Arc::downgrade(track)))
         .collect();
 
     let tx = state.event_tx.clone();
@@ -180,4 +180,3 @@ pub enum SelectedPanel {
     TrackList,
     Inspector,
 }
-

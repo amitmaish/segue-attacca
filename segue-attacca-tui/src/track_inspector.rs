@@ -1,7 +1,6 @@
 use std::{
     fmt::Display,
-    rc::{Rc, Weak},
-    sync::RwLock,
+    sync::{Arc, RwLock, Weak},
 };
 
 use fuzzy_matcher::{FuzzyMatcher, skim::SkimMatcherV2};
@@ -188,7 +187,7 @@ impl StatefulWidget for TrackInspector {
             && self.editing_value.is_some();
 
         let tags_list = if let Some(value) = self.editing_value.clone() {
-            let mut list: Vec<Rc<str>> = all_tags
+            let mut list: Vec<Arc<str>> = all_tags
                 .iter()
                 .filter(|tag| !tags_list.contains(*tag))
                 .filter(|tag| {
@@ -200,7 +199,7 @@ impl StatefulWidget for TrackInspector {
                 })
                 .cloned()
                 .collect();
-            list.sort_by_key(Rc::strong_count);
+            list.sort_by_key(Arc::strong_count);
             list.sort_by_key(|tag| {
                 let matcher = SkimMatcherV2::default();
                 matcher.fuzzy_match(tag, value.as_str()).unwrap_or(i64::MAX)
@@ -459,7 +458,7 @@ pub fn handle_inspector_events(event: &Event, state: &mut AppState) -> bool {
                             let tags = &track.tags;
                             let tags_list =
                                 if inspector.selected_field == TrackInspectorSelectedField::Tags {
-                                    let mut list: Vec<Rc<str>> = state
+                                    let mut list: Vec<Arc<str>> = state
                                         .library
                                         .tags
                                         .iter()
@@ -475,7 +474,7 @@ pub fn handle_inspector_events(event: &Event, state: &mut AppState) -> bool {
                                         })
                                         .cloned()
                                         .collect();
-                                    list.sort_by_key(Rc::strong_count);
+                                    list.sort_by_key(Arc::strong_count);
                                     list.sort_by_key(|tag| {
                                         let matcher = SkimMatcherV2::default();
                                         matcher.fuzzy_match(tag, value.as_str()).unwrap_or(i64::MAX)

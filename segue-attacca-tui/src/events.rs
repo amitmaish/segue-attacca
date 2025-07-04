@@ -1,3 +1,4 @@
+#[expect(dead_code)]
 pub enum Event {
     KeyPressed(KeyCode, Modifiers),
     Redraw,
@@ -11,6 +12,7 @@ pub enum KeyCode {
     Tab,
 }
 
+#[expect(dead_code)]
 pub struct Modifiers {
     pub shift: bool,
     pub ctrl: bool,

@@ -1,4 +1,4 @@
-use std::rc::Rc;
+use std::sync::Arc;
 
 use crate::{
     AppState,
@@ -16,7 +16,7 @@ pub fn handle_track_list_events(event: &Event, state: &mut AppState) -> bool {
                     .get_tracks()
                     .get(state.list_state().selected().unwrap_or(0))
                 {
-                    state.track_inspector = Some(TrackInspector::new(Rc::downgrade(track)));
+                    state.track_inspector = Some(TrackInspector::new(Arc::downgrade(track)));
                 } else {
                     state.track_inspector = None;
                 }
@@ -29,7 +29,7 @@ pub fn handle_track_list_events(event: &Event, state: &mut AppState) -> bool {
                     .get_tracks()
                     .get(state.list_state().selected().unwrap_or(0))
                 {
-                    state.track_inspector = Some(TrackInspector::new(Rc::downgrade(track)));
+                    state.track_inspector = Some(TrackInspector::new(Arc::downgrade(track)));
                 } else {
                     state.track_inspector = None;
                 }
