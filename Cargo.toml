@@ -4,4 +4,4 @@ members = ["segue-attacca-lib", "segue-attacca-tui"]
 
 [workspace.lints.clippy]
 unwrap_used = "warn"
-# expect_used = "warn"
+expect_used = "warn"

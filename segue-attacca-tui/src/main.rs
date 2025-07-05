@@ -19,6 +19,7 @@ use ratatui_image::{picker::Picker, protocol::StatefulProtocol};
 use segue_attacca_lib::music_library::MusicLibrary;
 use terminal_events::handle_terminal_events;
 use tokio::sync::mpsc::{Receiver, Sender, channel};
+use tracing::warn;
 use track_inspector::{TrackInspector, handle_inspector_events};
 use track_list::handle_track_list_events;
 
@@ -137,7 +138,13 @@ pub struct AppState {
 impl Default for AppState {
     fn default() -> Self {
         let (event_tx, event_rx) = channel(16);
-        let picker = Picker::from_query_stdio().expect("couldn't query stdio for picker");
+        let picker = match Picker::from_query_stdio() {
+            Ok(picker) => picker,
+            Err(e) => {
+                warn!("couldn't query stdio for picker: {e}");
+                Picker::from_fontsize((7, 14))
+            }
+        };
         Self {
             library: Default::default(),
             list: Default::default(),

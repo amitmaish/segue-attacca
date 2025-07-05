@@ -11,7 +11,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, BorderType, List, ListState, Paragraph, StatefulWidget, Widget, Wrap},
 };
-use ratatui_image::StatefulImage;
+use ratatui_image::{StatefulImage, protocol::StatefulProtocol};
 use rfd::FileDialog;
 use segue_attacca_lib::music_library::Track;
 use tokio::sync::oneshot;
@@ -99,9 +99,11 @@ impl StatefulWidget for TrackInspector {
 
         let (name, artist, path, tags_list);
         let art = if let Some(lock) = self.track.upgrade() {
-            let track = lock
-                .read()
-                .expect("couldn't read track in track inspector's render method");
+            let track = if let Ok(track) = lock.read() {
+                track
+            } else {
+                unreachable!()
+            };
             name = track.name.clone();
             artist = track.artist.clone();
             path = track.path.clone();
@@ -114,7 +116,7 @@ impl StatefulWidget for TrackInspector {
                         Asset::Some(_) | Asset::LoadError(_) | Asset::None => Some(asset),
                         Asset::Loading(receiver) => {
                             if let Ok(image) = receiver.try_recv() {
-                                *asset = Asset::Some(image);
+                                *asset = image;
                             }
                             Some(asset)
                         }
@@ -127,17 +129,38 @@ impl StatefulWidget for TrackInspector {
                             let state_tx = state.event_tx.clone();
                             tokio::spawn(async move {
                                 let _ = state_tx.send(Event::Redraw).await;
-                                let buffer = tokio::fs::read(path)
-                                    .await
-                                    .expect("couldn't open image at {path}");
-                                let image = image::load_from_memory(&buffer)
-                                    .expect("couldn't load image from memory");
-                                let protocol = tokio::task::spawn_blocking(move || {
+                                let buffer = match tokio::fs::read(path).await {
+                                    Ok(buf) => buf,
+                                    Err(e) => {
+                                        let _ = tx.send(Asset::<StatefulProtocol>::LoadError(
+                                            format!("couldn't open file: {e}").into(),
+                                        ));
+                                        return;
+                                    }
+                                };
+                                let image = match image::load_from_memory(&buffer) {
+                                    Ok(img) => img,
+                                    Err(e) => {
+                                        let _ = tx.send(Asset::LoadError(
+                                            format!("couldn't load image: {e}").into(),
+                                        ));
+                                        return;
+                                    }
+                                };
+                                let protocol = match tokio::task::spawn_blocking(move || {
                                     picker.new_resize_protocol(image)
                                 })
                                 .await
-                                .expect("join error");
-                                let _ = tx.send(protocol);
+                                {
+                                    Ok(protocol) => protocol,
+                                    Err(e) => {
+                                        let _ = tx.send(Asset::LoadError(
+                                            format!("join error: {e}").into(),
+                                        ));
+                                        return;
+                                    }
+                                };
+                                let _ = tx.send(Asset::Some(protocol));
                                 let _ = state_tx.send(Event::Redraw).await;
                             });
 
@@ -146,12 +169,10 @@ impl StatefulWidget for TrackInspector {
                     }
                 } else {
                     state.images.insert(path.clone(), Asset::Unloaded);
-                    Some(
-                        state
-                            .images
-                            .get_mut(path)
-                            .expect("i'm pretty sure this is impossible"),
-                    )
+                    Some(match state.images.get_mut(path) {
+                        Some(img) => img,
+                        None => unreachable!(),
+                    })
                 }
             } else {
                 None
